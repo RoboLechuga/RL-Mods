@@ -1,0 +1,8 @@
+EXPORTS
+XInputEnable=XInput_XInputEnable @1
+XInputGetBatteryInformation=XInput_XInputGetBatteryInformation @2
+XInputGetCapabilities=XInput_XInputGetCapabilities @3
+XInputGetDSoundAudioDeviceGuids=XInput_XInputGetDSoundAudioDeviceGuids @4
+XInputGetKeystroke=XInput_XInputGetKeystroke @5
+XInputGetState=XInput_XInputGetState @6
+XInputSetState=XInput_XInputSetState @7

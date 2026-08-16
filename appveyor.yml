@@ -1,0 +1,16 @@
+branches:
+  only:
+    - develop
+
+image: Visual Studio 2022
+configuration: Release
+platform: Win32
+
+build:
+  project: RSForceEnum/RSForceEnum.vcxproj
+  parallel: false
+  verbosity: minimal
+
+artifacts:
+  - path: 'RSForceEnum\Release\xinput1_3.dll'
+    name: RSForceEnum
