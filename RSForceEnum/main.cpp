@@ -266,14 +266,11 @@ extern "C"
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
-    if (reason == DLL_PROCESS_ATTACH)
-    {
-        DisableThreadLibraryCalls(module);
-        InitRealXInput();
-
-        HANDLE thread = CreateThread(nullptr, 0, WorkerThread, nullptr, 0, nullptr);
-        if (thread) CloseHandle(thread);
-    }
+if (reason == DLL_PROCESS_ATTACH)
+{
+    DisableThreadLibraryCalls(module);
+    InitRealXInput();
+}
     else if (reason == DLL_PROCESS_DETACH)
     {
         InterlockedExchange(&g_running, FALSE);
