@@ -125,7 +125,7 @@ namespace
         return true;
     }
 
-    void __stdcall SaveEnumerationPointer(std::uint32_t esiValue)
+    void __cdecl SaveEnumerationPointer(std::uint32_t esiValue)
     {
         if (!g_enumFlags)
             g_enumFlags = reinterpret_cast<std::uint32_t*>(esiValue + 4);
