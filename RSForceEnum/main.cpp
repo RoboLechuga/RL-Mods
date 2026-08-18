@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include "AsioPassthrough.hpp"
+#include "TuningControl.hpp"
 #include <windows.h>
 #include <Xinput.h>
 #include <cstdint>
@@ -240,6 +241,7 @@ namespace
         // Just wait for F8.
         
         AsioPassthrough::Install();
+        TuningControl::Initialize();
         
         while (InterlockedCompareExchange(
             &g_running,
@@ -251,9 +253,11 @@ namespace
                 ForceEnumeration();
             }
 
+            TuningControl::Poll();
             Sleep(25);
         }
 
+        TuningControl::Shutdown();
         return 0;
     }
 }
