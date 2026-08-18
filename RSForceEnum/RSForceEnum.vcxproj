@@ -48,11 +48,14 @@
       <AdditionalDependencies>User32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
-  <ItemGroup>
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="AsioPassthrough.cpp" />
-    <ClCompile Include="AsioPassthrough.hpp" />
-  </ItemGroup>
+<ItemGroup>
+  <ClCompile Include="main.cpp" />
+  <ClCompile Include="AsioPassthrough.cpp" />
+</ItemGroup>
+
+<ItemGroup>
+  <ClInclude Include="AsioPassthrough.hpp" />
+</ItemGroup>
   <ItemGroup>
     <None Include="xinput1_3.def" />
   </ItemGroup>
