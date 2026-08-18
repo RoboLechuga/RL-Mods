@@ -78,7 +78,10 @@ namespace AsioPassthrough
 
         struct PlayerInput
         {
-            int asioChannel = -1;
+            // RS_ASIO Channel= is treated as the index among discovered
+            // ASIO input channels, matching the known-good single-player build.
+            int inputIndex = -1;
+
             void* buffers[2] = {};
             long sampleType = -1;
             bool active = false;
@@ -386,6 +389,8 @@ namespace AsioPassthrough
                     (*reinterpret_cast<void***>(self))
                         [SLOT_ASIO_GET_CHANNEL_INFO]);
 
+            int discoveredInputIndex = 0;
+
             for (long i = 0; i < numChannels; ++i)
             {
                 if (!infos[i].isInput)
@@ -395,10 +400,10 @@ namespace AsioPassthrough
                 {
                     auto& input = playerInputs[player];
 
-                    if (input.asioChannel < 0)
+                    if (input.inputIndex < 0)
                         continue;
 
-                    if (infos[i].channelNum != input.asioChannel)
+                    if (discoveredInputIndex != input.inputIndex)
                         continue;
 
                     input.buffers[0] = infos[i].buffers[0];
@@ -419,6 +424,8 @@ namespace AsioPassthrough
 
                     input.active = true;
                 }
+
+                ++discoveredInputIndex;
             }
 
             ASIOSampleRate sampleRate = 0.0;
@@ -523,7 +530,7 @@ namespace AsioPassthrough
 
         for (int player = 0; player < MAX_PLAYERS; ++player)
         {
-            playerInputs[player].asioChannel =
+            playerInputs[player].inputIndex =
                 ReadInputChannel(player);
         }
 
