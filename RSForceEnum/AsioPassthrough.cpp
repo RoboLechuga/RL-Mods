@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,7 @@ namespace AsioPassthrough
         constexpr long MAX_BUFFER_FRAMES = 4096;
         constexpr float INT32_TO_FLOAT = 1.0f / 2147483648.0f;
         constexpr float FLOAT_TO_INT32 = 2147483647.0f;
+        constexpr int MAX_PLAYERS = 2;
 
         struct ASIOBufferInfo
         {
@@ -74,22 +76,27 @@ namespace AsioPassthrough
         constexpr size_t SLOT_ASIO_CREATE_BUFFERS = 19;
         constexpr size_t SLOT_CLASS_FACTORY_CREATE_INSTANCE = 3;
 
+        struct PlayerInput
+        {
+            int asioChannel = -1;
+            void* buffers[2] = {};
+            long sampleType = -1;
+            bool active = false;
+
+            std::vector<float> conversionBuffer;
+            Audio::DelayLinePitchShifter shifter{ 0 };
+        };
+
         CreateInstance_t originalCreateInstance = nullptr;
         CreateBuffers_t originalCreateBuffers = nullptr;
 
         ASIOCallbacks originalCallbacks{};
         ASIOCallbacks hookedCallbacks{};
 
-        void* inputBuffers[2][2] = {};
-        int discoveredInputChannels = 0;
+        PlayerInput playerInputs[MAX_PLAYERS];
+
         long activeBufferFrames = 0;
-        long activeSampleType = -1;
-        int selectedInputChannel = 0;
-
         Audio::CaptureFormat format{};
-        std::vector<float> conversionBuffer;
-
-        Audio::DelayLinePitchShifter shifter(0);
 
         std::atomic<bool> installed{ false };
         std::atomic<bool> processingReady{ false };
@@ -137,13 +144,20 @@ namespace AsioPassthrough
             return driver;
         }
 
-        int ReadInputChannel()
+        int ReadInputChannel(int player)
         {
+            char section[32] = {};
+
+            sprintf_s(
+                section,
+                "Asio.Input.%d",
+                player);
+
             return static_cast<int>(
                 GetPrivateProfileIntA(
-                    "Asio.Input.0",
+                    section,
                     "Channel",
-                    0,
+                    -1,
                     ".\\RS_ASIO.ini"));
         }
 
@@ -243,43 +257,55 @@ namespace AsioPassthrough
             if (!processingReady.load(std::memory_order_acquire))
                 return;
 
-            if (selectedInputChannel < 0 ||
-                selectedInputChannel >= discoveredInputChannels)
-                return;
-
-            if (activeSampleType != ASIOSTInt32LSB)
+            if (doubleBufferIndex < 0 || doubleBufferIndex > 1)
                 return;
 
             if (activeBufferFrames <= 0 ||
                 activeBufferFrames > MAX_BUFFER_FRAMES)
                 return;
 
-            auto* samples = reinterpret_cast<std::int32_t*>(
-                inputBuffers[selectedInputChannel][doubleBufferIndex]);
-
-            if (!samples)
-                return;
-
             const size_t count =
                 static_cast<size_t>(activeBufferFrames);
 
-            for (size_t i = 0; i < count; ++i)
-                conversionBuffer[i] =
-                    static_cast<float>(samples[i]) * INT32_TO_FLOAT;
-
-            shifter.Process(
-                conversionBuffer.data(),
-                static_cast<std::uint32_t>(activeBufferFrames));
-
-            for (size_t i = 0; i < count; ++i)
+            for (int player = 0; player < MAX_PLAYERS; ++player)
             {
-                float value = conversionBuffer[i];
+                auto& input = playerInputs[player];
 
-                if (value < -1.0f) value = -1.0f;
-                if (value > 1.0f) value = 1.0f;
+                if (!input.active)
+                    continue;
 
-                samples[i] =
-                    static_cast<std::int32_t>(value * FLOAT_TO_INT32);
+                if (input.sampleType != ASIOSTInt32LSB)
+                    continue;
+
+                auto* samples =
+                    reinterpret_cast<std::int32_t*>(
+                        input.buffers[doubleBufferIndex]);
+
+                if (!samples)
+                    continue;
+
+                for (size_t i = 0; i < count; ++i)
+                {
+                    input.conversionBuffer[i] =
+                        static_cast<float>(samples[i]) *
+                        INT32_TO_FLOAT;
+                }
+
+                input.shifter.Process(
+                    input.conversionBuffer.data(),
+                    static_cast<std::uint32_t>(activeBufferFrames));
+
+                for (size_t i = 0; i < count; ++i)
+                {
+                    float value = input.conversionBuffer[i];
+
+                    if (value < -1.0f) value = -1.0f;
+                    if (value > 1.0f) value = 1.0f;
+
+                    samples[i] =
+                        static_cast<std::int32_t>(
+                            value * FLOAT_TO_INT32);
+                }
             }
         }
 
@@ -346,38 +372,52 @@ namespace AsioPassthrough
             processingReady.store(false, std::memory_order_release);
 
             activeBufferFrames = bufferSize;
-            discoveredInputChannels = 0;
-            activeSampleType = -1;
+
+            for (int player = 0; player < MAX_PLAYERS; ++player)
+            {
+                playerInputs[player].buffers[0] = nullptr;
+                playerInputs[player].buffers[1] = nullptr;
+                playerInputs[player].sampleType = -1;
+                playerInputs[player].active = false;
+            }
 
             auto getChannelInfo =
                 reinterpret_cast<GetChannelInfo_t>(
                     (*reinterpret_cast<void***>(self))
                         [SLOT_ASIO_GET_CHANNEL_INFO]);
 
-            for (long i = 0;
-                 i < numChannels && discoveredInputChannels < 2;
-                 ++i)
+            for (long i = 0; i < numChannels; ++i)
             {
                 if (!infos[i].isInput)
                     continue;
 
-                const int index = discoveredInputChannels++;
-
-                inputBuffers[index][0] = infos[i].buffers[0];
-                inputBuffers[index][1] = infos[i].buffers[1];
-
-                ASIOChannelInfo channelInfo{};
-                channelInfo.channel = infos[i].channelNum;
-                channelInfo.isInput = 1;
-
-                if (getChannelInfo &&
-                    getChannelInfo(
-                        self,
-                        nullptr,
-                        &channelInfo) == ASE_OK)
+                for (int player = 0; player < MAX_PLAYERS; ++player)
                 {
-                    if (index == selectedInputChannel)
-                        activeSampleType = channelInfo.type;
+                    auto& input = playerInputs[player];
+
+                    if (input.asioChannel < 0)
+                        continue;
+
+                    if (infos[i].channelNum != input.asioChannel)
+                        continue;
+
+                    input.buffers[0] = infos[i].buffers[0];
+                    input.buffers[1] = infos[i].buffers[1];
+
+                    ASIOChannelInfo channelInfo{};
+                    channelInfo.channel = infos[i].channelNum;
+                    channelInfo.isInput = 1;
+
+                    if (getChannelInfo &&
+                        getChannelInfo(
+                            self,
+                            nullptr,
+                            &channelInfo) == ASE_OK)
+                    {
+                        input.sampleType = channelInfo.type;
+                    }
+
+                    input.active = true;
                 }
             }
 
@@ -403,30 +443,41 @@ namespace AsioPassthrough
                 format.sampleRate = 0;
             }
 
-            format.sampleFormat =
-                activeSampleType == ASIOSTInt32LSB
-                    ? Audio::SampleFormat::Int32
-                    : Audio::SampleFormat::Unsupported;
-
             format.channelCount = 1;
 
-            if (format.IsUsable() &&
-                selectedInputChannel >= 0 &&
-                selectedInputChannel < discoveredInputChannels &&
-                bufferSize > 0 &&
-                bufferSize <= MAX_BUFFER_FRAMES)
+            bool anyReady = false;
+
+            if (bufferSize > 0 &&
+                bufferSize <= MAX_BUFFER_FRAMES &&
+                format.sampleRate > 0)
             {
-                // All allocations happen here, before the realtime callback.
-                conversionBuffer.assign(
-                    static_cast<size_t>(MAX_BUFFER_FRAMES),
-                    0.0f);
+                for (int player = 0; player < MAX_PLAYERS; ++player)
+                {
+                    auto& input = playerInputs[player];
 
-                shifter.Prepare(format);
+                    if (!input.active)
+                        continue;
 
-                processingReady.store(
-                    true,
-                    std::memory_order_release);
+                    if (input.sampleType != ASIOSTInt32LSB)
+                        continue;
+
+                    Audio::CaptureFormat playerFormat = format;
+                    playerFormat.sampleFormat =
+                        Audio::SampleFormat::Int32;
+
+                    input.conversionBuffer.assign(
+                        static_cast<size_t>(MAX_BUFFER_FRAMES),
+                        0.0f);
+
+                    input.shifter.Prepare(playerFormat);
+
+                    anyReady = true;
+                }
             }
+
+            processingReady.store(
+                anyReady,
+                std::memory_order_release);
 
             return result;
         }
@@ -470,7 +521,11 @@ namespace AsioPassthrough
         if (installed.load())
             return true;
 
-        selectedInputChannel = ReadInputChannel();
+        for (int player = 0; player < MAX_PLAYERS; ++player)
+        {
+            playerInputs[player].asioChannel =
+                ReadInputChannel(player);
+        }
 
         const std::string driverName = ReadDriverName();
         if (driverName.empty())
@@ -532,7 +587,12 @@ namespace AsioPassthrough
 
     void SetTuning(int semitones, int referenceHz)
     {
-        shifter.SetTuning(semitones, referenceHz);
+        for (int player = 0; player < MAX_PLAYERS; ++player)
+        {
+            playerInputs[player].shifter.SetTuning(
+                semitones,
+                referenceHz);
+        }
     }
 
     bool IsInstalled()
