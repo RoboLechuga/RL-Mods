@@ -530,6 +530,11 @@ namespace AsioPassthrough
         return true;
     }
 
+    void SetTuning(int semitones, int referenceHz)
+    {
+        shifter.SetTuning(semitones, referenceHz);
+    }
+
     bool IsInstalled()
     {
         return installed.load();
