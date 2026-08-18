@@ -1,4 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
+#include "AsioPassthrough.hpp"
 #include <windows.h>
 #include <Xinput.h>
 #include <cstdint>
