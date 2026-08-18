@@ -34,6 +34,22 @@ namespace Audio
         ratio.store(SemitonesToRatio(semitones), std::memory_order_relaxed);
     }
 
+    void DelayLinePitchShifter::SetTuning(int semitones, int referenceHz)
+    {
+        if (referenceHz < 1)
+            referenceHz = 440;
+
+        const float coarse =
+            std::pow(2.0f, static_cast<float>(semitones) / 12.0f);
+
+        const float reference =
+            static_cast<float>(referenceHz) / 440.0f;
+
+        ratio.store(
+            coarse * reference,
+            std::memory_order_relaxed);
+    }
+
     void DelayLinePitchShifter::Prepare(const CaptureFormat&)
     {
         ring.assign(RING_SAMPLES, 0.0f);
