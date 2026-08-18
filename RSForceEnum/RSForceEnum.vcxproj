@@ -51,10 +51,14 @@
 <ItemGroup>
   <ClCompile Include="main.cpp" />
   <ClCompile Include="AsioPassthrough.cpp" />
+  <ClCompile Include="DelayLinePitchShifter.cpp" />
 </ItemGroup>
 
 <ItemGroup>
   <ClInclude Include="AsioPassthrough.hpp" />
+  <ClInclude Include="CaptureFormat.h" />
+  <ClInclude Include="IInputProcessor.hpp" />
+  <ClInclude Include="DelayLinePitchShifter.hpp" />
 </ItemGroup>
   <ItemGroup>
     <None Include="xinput1_3.def" />
