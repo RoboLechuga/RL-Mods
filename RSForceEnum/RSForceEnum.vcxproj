@@ -52,6 +52,7 @@
   <ClCompile Include="main.cpp" />
   <ClCompile Include="AsioPassthrough.cpp" />
   <ClCompile Include="DelayLinePitchShifter.cpp" />
+  <ClCompile Include="TuningControl.cpp" />
 </ItemGroup>
 
 <ItemGroup>
@@ -59,6 +60,7 @@
   <ClInclude Include="CaptureFormat.h" />
   <ClInclude Include="IInputProcessor.hpp" />
   <ClInclude Include="DelayLinePitchShifter.hpp" />
+  <ClInclude Include="TuningControl.hpp" />
 </ItemGroup>
   <ItemGroup>
     <None Include="xinput1_3.def" />
