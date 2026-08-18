@@ -238,7 +238,9 @@ namespace
         // No executable memory modification.
         //
         // Just wait for F8.
-AsioPassthrough::Install();
+        
+        AsioPassthrough::Install();
+        
         while (InterlockedCompareExchange(
             &g_running,
             TRUE,
