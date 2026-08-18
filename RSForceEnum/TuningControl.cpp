@@ -18,18 +18,20 @@ namespace TuningControl
         constexpr int DEFAULT_REFERENCE_HZ = 440;
 
         // Controls:
-        // F5  = lower pitch one semitone
-        // F6  = raise pitch one semitone
-        // F9  = reference -1 Hz
-        // F10 = reference +1 Hz
-        // F11 = reset reference to A440
+        // ,  = lower pitch one semitone
+        // .  = raise pitch one semitone
+        // ;  = reference -1 Hz
+        // '  = reference +1 Hz
+        // \  = reset reference to A440
         //
         // F8 remains force enumeration in main.cpp.
-        constexpr int KEY_DROP_DOWN = VK_F5;
-        constexpr int KEY_DROP_UP   = VK_F6;
-        constexpr int KEY_REF_DOWN  = VK_F9;
-        constexpr int KEY_REF_UP    = VK_F10;
-        constexpr int KEY_REF_RESET = VK_F11;
+        //
+        // These use the OEM virtual-key codes for a standard US keyboard.
+        constexpr int KEY_DROP_DOWN = VK_OEM_COMMA;    // ,
+        constexpr int KEY_DROP_UP   = VK_OEM_PERIOD;   // .
+        constexpr int KEY_REF_DOWN  = VK_OEM_1;        // ;
+        constexpr int KEY_REF_UP    = VK_OEM_7;        // '
+        constexpr int KEY_REF_RESET = VK_OEM_5;        // \
 
         int g_dropSemitones = 0;
         int g_referenceHz = DEFAULT_REFERENCE_HZ;
