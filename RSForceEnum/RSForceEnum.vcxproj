@@ -50,6 +50,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="sioPassthrough.cpp" />
+    <ClCompile Include="sioPassthrough.hpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="xinput1_3.def" />
