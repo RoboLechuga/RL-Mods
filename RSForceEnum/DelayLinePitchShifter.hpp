@@ -14,6 +14,10 @@ namespace Audio
 
         void SetSemitones(int semitones);
 
+        // Coarse shift + concert-reference correction.
+        // Example: (-1, 445) = Eb plus A445 reference.
+        void SetTuning(int semitones, int referenceHz);
+
         void Prepare(const CaptureFormat& format) override;
         void Process(float* samples, std::uint32_t frameCount) override;
         std::uint32_t GetLatencyFrames() const override;
