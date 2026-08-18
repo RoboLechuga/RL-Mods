@@ -89,8 +89,7 @@ namespace AsioPassthrough
         Audio::CaptureFormat format{};
         std::vector<float> conversionBuffer;
 
-        // FIRST PROCESSOR TEST: fixed one-semitone drop.
-        Audio::DelayLinePitchShifter shifter(-1);
+        Audio::DelayLinePitchShifter shifter(0);
 
         std::atomic<bool> installed{ false };
         std::atomic<bool> processingReady{ false };
