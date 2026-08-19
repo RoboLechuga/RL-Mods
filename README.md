@@ -169,4 +169,4 @@ RSMods-Min would not exist without the work of those projects and their contribu
 
 Pitch shifting is performed in real time and may introduce a small amount of additional latency or occasional low-level splice artifacts depending on the input signal and tuning shift.
 
-AutoClave is an independent community project and is not affiliated with Ubisoft.
+RSMods-Min is an independent community project and is not affiliated with Ubisoft.

@@ -7,10 +7,10 @@ configuration: Release
 platform: Win32
 
 build:
-  project: AutoClave/Scalpel.vcxproj
+  project: src/RSMods-Min.vcxproj
   parallel: false
   verbosity: minimal
 
 artifacts:
-  - path: 'AutoClave\Release\xinput1_3.dll'
-    name: Scalpel
+  - path: 'src\Release\xinput1_3.dll'
+    name: RSMods-Min
