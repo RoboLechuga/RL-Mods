@@ -135,11 +135,11 @@ Visual Studio 2022:
 
 - Configuration: `Release`
 - Platform: `Win32`
-- Project: `AutoClave/Scalpel.vcxproj`
+- Project: `src/RSMods-Min.vcxproj`
 
 Output:
 
-`AutoClave/Release/xinput1_3.dll`
+`src/Release/xinput1_3.dll`
 
 AppVeyor is configured to build the `develop` branch.
 
