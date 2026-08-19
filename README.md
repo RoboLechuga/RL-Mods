@@ -1,8 +1,8 @@
-# RS-Scalpel
+# RSMods-Min
 
 A lightweight, purpose-built utility for **Rocksmith 2014 Remastered**.
 
-RS-Scalpel keeps a few useful functions from larger Rocksmith mod projects, trims away the rest, and packages them into a tiny `xinput1_3.dll` proxy.
+RSMods-Min keeps a few useful functions from larger Rocksmith mod projects, trims away the rest, and packages them into a tiny `xinput1_3.dll` proxy.
 
 The goal is simple:
 
@@ -70,19 +70,19 @@ The tuning controls themselves continue to work even if the overlay cannot be di
 - RS_ASIO
 - An ASIO audio interface
 
-RS-Scalpel does **not** replace RS_ASIO.
+RSMods-Min does **not** replace RS_ASIO.
 
 Your existing RS_ASIO files and configuration remain in place.
 
 ## Installation
 
-1. Download `xinput1_3.dll` from the latest RS-Scalpel release.
+1. Download `xinput1_3.dll` from the latest RSMods-Min release.
 2. Copy it into the Rocksmith 2014 root folder.
 3. If another mod already provides `xinput1_3.dll`, remove or replace that file first.
 4. Leave your existing RS_ASIO installation and `RS_ASIO.ini` in place.
 5. Start Rocksmith normally.
 
-To uninstall RS-Scalpel, remove its `xinput1_3.dll`.
+To uninstall RSMods-Min, remove its `xinput1_3.dll`.
 
 ## Controls
 
@@ -97,17 +97,17 @@ To uninstall RS-Scalpel, remove its `xinput1_3.dll`.
 
 ## How It Works
 
-RS-Scalpel is a small 32-bit `xinput1_3.dll` proxy.
+RSMods-Min is a small 32-bit `xinput1_3.dll` proxy.
 
 It forwards the normal XInput exports to the Windows system XInput library while adding two narrowly targeted Rocksmith functions.
 
 ### Song Enumeration
 
-Rather than installing a permanent Rocksmith code hook, RS-Scalpel resolves Rocksmith's enumeration state when **F8** is pressed and sets the required enumeration flags directly.
+Rather than installing a permanent Rocksmith code hook, RSMods-Min resolves Rocksmith's enumeration state when **F8** is pressed and sets the required enumeration flags directly.
 
 ### Pitch Shifting
 
-With RS_ASIO, RS-Scalpel intercepts the ASIO input buffers before Rocksmith receives them.
+With RS_ASIO, RSMods-Min intercepts the ASIO input buffers before Rocksmith receives them.
 
 The pitch shifter uses a short rolling delay line with period detection, waveform-aligned jumps, and crossfades to alter pitch while keeping additional latency small.
 
@@ -115,7 +115,7 @@ Each multiplayer input is processed independently.
 
 ## Philosophy
 
-RS-Scalpel is intentionally **not** a general Rocksmith mod framework.
+RSMods-Min is intentionally **not** a general Rocksmith mod framework.
 
 There is:
 
@@ -128,8 +128,6 @@ There is:
 - no large collection of unrelated patches
 
 It exists to perform a small set of useful operations and otherwise stay out of Rocksmith's way.
-
-The source folder is named **AutoClave**, because why not have a little fun, I was cutting out all the things that I did not need, hence scalpel and that is prepped for surgery in an AutoClave.  I may or may not have been influenced by Tequila, anything is possible.
 
 ## Building
 
@@ -153,11 +151,11 @@ Development takes place on `develop` and is merged into `main` through pull requ
 
 The repository is provided publicly so the implementation can be inspected and learned from.
 
-If you want to modify, extend, or experiment with RS-Scalpel, please **fork the repository** and work from your own fork.
+If you want to modify, extend, or experiment with RSMods-Min, please **fork the repository** and work from your own fork.
 
 ## Credits
 
-RS-Scalpel builds on work done by members of the Rocksmith modding community.
+RSMods-Min builds on work done by members of the Rocksmith modding community.
 
 In particular:
 
@@ -165,10 +163,10 @@ In particular:
 - **RSModsPlus** — ASIO input interception and delay-line pitch-shifting work
 - **RS_ASIO** — ASIO support for Rocksmith 2014
 
-RS-Scalpel would not exist without the work of those projects and their contributors.
+RSMods-Min would not exist without the work of those projects and their contributors.
 
 ## Notes
 
 Pitch shifting is performed in real time and may introduce a small amount of additional latency or occasional low-level splice artifacts depending on the input signal and tuning shift.
 
-RS-Scalpel is an independent community project and is not affiliated with Ubisoft.
+RSMods-Min is an independent community project and is not affiliated with Ubisoft.
