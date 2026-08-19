@@ -7,10 +7,10 @@ configuration: Release
 platform: Win32
 
 build:
-  project: RSForceEnum/RSForceEnum.vcxproj
+  project: AutoClave/Scalpel.vcxproj
   parallel: false
   verbosity: minimal
 
 artifacts:
-  - path: 'RSForceEnum\Release\xinput1_3.dll'
-    name: RSForceEnum
+  - path: 'AutoClave\Release\xinput1_3.dll'
+    name: Scalpel
