@@ -1,38 +1,174 @@
-# RSForceEnum
+# RS-Scalpel
 
-Minimal `xinput1_3.dll` proxy for Rocksmith 2014 Remastered.
+A lightweight, purpose-built utility for **Rocksmith 2014 Remastered**.
 
-## Function
+RS-Scalpel keeps a few useful functions from larger Rocksmith mod projects, trims away the rest, and packages them into a tiny `xinput1_3.dll` proxy.
 
-Press **F8** to force Rocksmith to re-enumerate songs.
+The goal is simple:
 
-This keeps only the enumeration technique from RSMods:
-- signature-scan the Rocksmith `.text` section
-- hook the enumeration service to capture its flags pointer
-- set the same two flags on F8
+**Do a few things well, with as little interference as possible.**
 
-No RSMods GUI, INI, D3D overlay, MIDI, audio-device code, Crowd Control,
-Wwise code, settings system, or bug-prevention patches.
+## Features
 
-## Build
+### Song Re-enumeration
 
-AppVeyor / Visual Studio 2022:
-- Release
-- Win32
-- `RSForceEnum/RSForceEnum.vcxproj`
+Press **F8** to force Rocksmith to re-enumerate the song library.
 
-Output: `RSForceEnum/Release/xinput1_3.dll`
+Useful after adding or removing CDLC without restarting the game.
 
-## Install
+### Drop Tuning
 
-Copy only `xinput1_3.dll` to the Rocksmith 2014 root folder.
-Replace/remove the RSMods `xinput1_3.dll` first.
+Pitch-shift the incoming guitar signal before Rocksmith processes it.
 
-RS_ASIO remains separate (`avrt.dll`, `RS_ASIO.dll`, `RS_ASIO.ini`).
+Controls:
 
-## Use
+| Key | Function |
+|---|---|
+| `,` | Lower tuning one semitone |
+| `.` | Raise tuning one semitone |
 
-After Rocksmith has completed its normal startup song enumeration, press **F8**
-after adding/removing a song.
+The on-screen display shows the resulting tuning:
 
-The DLL creates no config or debug files.
+`E` → `Eb` → `D` → `C#` → `C` → etc.
+
+### Alternate Tuning Reference
+
+Adjust the tuning reference independently of the semitone shift.
+
+| Key | Function |
+|---|---|
+| `;` | Reference -1 Hz |
+| `'` | Reference +1 Hz |
+| `\` | Reset reference to A440 |
+
+Supported range:
+
+**A420 through A461**
+
+Example:
+
+`Drop: Eb    Ref: A445`
+
+This is useful for recordings mastered slightly sharp or flat relative to A440.
+
+### Multiplayer
+
+Both Rocksmith players are supported when using two inputs from the same ASIO interface.
+
+Both players use the same selected drop tuning and reference frequency, while each input has its own independent pitch-shifter processing state.
+
+### On-Screen Display
+
+Tuning changes briefly display in a small overlay.
+
+The tuning controls themselves continue to work even if the overlay cannot be displayed.
+
+## Requirements
+
+- Rocksmith 2014 Remastered
+- Windows
+- RS_ASIO
+- An ASIO audio interface
+
+RS-Scalpel does **not** replace RS_ASIO.
+
+Your existing RS_ASIO files and configuration remain in place.
+
+## Installation
+
+1. Download `xinput1_3.dll` from the latest RS-Scalpel release.
+2. Copy it into the Rocksmith 2014 root folder.
+3. If another mod already provides `xinput1_3.dll`, remove or replace that file first.
+4. Leave your existing RS_ASIO installation and `RS_ASIO.ini` in place.
+5. Start Rocksmith normally.
+
+To uninstall RS-Scalpel, remove its `xinput1_3.dll`.
+
+## Controls
+
+| Key | Function |
+|---|---|
+| `F8` | Force song re-enumeration |
+| `,` | Lower pitch one semitone |
+| `.` | Raise pitch one semitone |
+| `;` | Lower tuning reference 1 Hz |
+| `'` | Raise tuning reference 1 Hz |
+| `\` | Reset tuning reference to A440 |
+
+## How It Works
+
+RS-Scalpel is a small 32-bit `xinput1_3.dll` proxy.
+
+It forwards the normal XInput exports to the Windows system XInput library while adding two narrowly targeted Rocksmith functions.
+
+### Song Enumeration
+
+Rather than installing a permanent Rocksmith code hook, RS-Scalpel resolves Rocksmith's enumeration state when **F8** is pressed and sets the required enumeration flags directly.
+
+### Pitch Shifting
+
+With RS_ASIO, RS-Scalpel intercepts the ASIO input buffers before Rocksmith receives them.
+
+The pitch shifter uses a short rolling delay line with period detection, waveform-aligned jumps, and crossfades to alter pitch while keeping additional latency small.
+
+Each multiplayer input is processed independently.
+
+## Philosophy
+
+RS-Scalpel is intentionally **not** a general Rocksmith mod framework.
+
+There is:
+
+- no configuration GUI
+- no Direct3D mod overlay
+- no MIDI subsystem
+- no Crowd Control
+- no gameplay modification framework
+- no background logging system
+- no large collection of unrelated patches
+
+It exists to perform a small set of useful operations and otherwise stay out of Rocksmith's way.
+
+The source folder is named **AutoClave**, because why not have a little fun, I was cutting out all the things that I did not need, hence scalpel and that is prepped for surgery in an AutoClave.  I may or may not have been influenced by Tequila, anything is possible.
+
+## Building
+
+Visual Studio 2022:
+
+- Configuration: `Release`
+- Platform: `Win32`
+- Project: `AutoClave/Scalpel.vcxproj`
+
+Output:
+
+`AutoClave/Release/xinput1_3.dll`
+
+AppVeyor is configured to build the `develop` branch.
+
+## Development
+
+`main` contains release-ready code.
+
+Development takes place on `develop` and is merged into `main` through pull requests.
+
+The repository is provided publicly so the implementation can be inspected and learned from.
+
+If you want to modify, extend, or experiment with RS-Scalpel, please **fork the repository** and work from your own fork.
+
+## Credits
+
+RS-Scalpel builds on work done by members of the Rocksmith modding community.
+
+In particular:
+
+- **RSMods** — Rocksmith modding techniques and song re-enumeration research
+- **RSModsPlus** — ASIO input interception and delay-line pitch-shifting work
+- **RS_ASIO** — ASIO support for Rocksmith 2014
+
+RS-Scalpel would not exist without the work of those projects and their contributors.
+
+## Notes
+
+Pitch shifting is performed in real time and may introduce a small amount of additional latency or occasional low-level splice artifacts depending on the input signal and tuning shift.
+
+RS-Scalpel is an independent community project and is not affiliated with Ubisoft.
