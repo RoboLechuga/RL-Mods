@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "AsioPassthrough.hpp"
-#include "DelayLinePitchShifter.hpp"
+#include "RealtimePitchShifter.hpp"
 
 #pragma comment(lib, "Ole32.lib")
 #pragma comment(lib, "Advapi32.lib")
@@ -87,7 +87,7 @@ namespace AsioPassthrough
             bool active = false;
 
             std::vector<float> conversionBuffer;
-            Audio::DelayLinePitchShifter shifter{ 0 };
+            Audio::RealtimePitchShifter shifter{ 0 };};
         };
 
         CreateInstance_t originalCreateInstance = nullptr;
