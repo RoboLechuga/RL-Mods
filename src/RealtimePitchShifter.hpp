@@ -2,6 +2,7 @@
 
 #include "IInputProcessor.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -23,12 +24,26 @@ namespace Audio
         std::uint32_t GetLatencyFrames() const override;
 
     private:
+        static constexpr std::size_t GRAIN_COUNT = 4;
+        static constexpr std::size_t OUTPUT_TAIL_SIZE = 128;
+
+        struct Grain
+        {
+            std::uint32_t age = 0;
+            double anchorDelay = 0.0;
+        };
+
         static float RatioForTuning(int semitones, int referenceHz);
         static std::uint32_t NextPowerOfTwo(std::uint32_t value);
 
         float ReadHistory(double delayFrames) const;
-        void TrackPeriod(float sample);
-        void BeginDelayJump(double newDelay);
+        float GrainWindow(std::uint32_t age) const;
+
+        double FindAlignedDelay() const;
+        void ResetGrain(Grain& grain);
+
+        void PushOutputTail(float sample);
+        float ReadOutputTail(std::size_t indexFromOldest) const;
 
         std::atomic<float> targetRatio{ 1.0f };
         std::atomic<bool> neutral{ true };
@@ -39,28 +54,23 @@ namespace Audio
 
         std::uint32_t sampleRate = 48000;
 
-        double readDelay = 0.0;
-        double oldReadDelay = 0.0;
+        std::uint32_t grainFrames = 480;
+        std::uint32_t hopFrames = 120;
+        std::uint32_t searchRadius = 32;
+        std::uint32_t correlationFrames = 64;
 
-        double lowDelay = 0.0;
-        double centerDelay = 0.0;
-        double highDelay = 0.0;
+        double baseDelay = 540.0;
+
+        std::array<Grain, GRAIN_COUNT> grains{};
+
+        std::array<float, OUTPUT_TAIL_SIZE> outputTail{};
+        std::size_t outputTailWrite = 0;
+        std::size_t outputTailCount = 0;
 
         float currentRatio = 1.0f;
         float ratioStep = 1.0f;
 
-        std::uint32_t crossfadeLength = 0;
-        std::uint32_t crossfadeRemaining = 0;
-
         float wetMix = 0.0f;
         float wetStep = 1.0f;
-
-        float previousInput = 0.0f;
-        std::uint64_t sampleCounter = 0;
-        std::uint64_t lastPositiveCrossing = 0;
-
-        double estimatedPeriod = 240.0;
-        int periodCandidateCount = 0;
-        double periodCandidate = 0.0;
     };
 }

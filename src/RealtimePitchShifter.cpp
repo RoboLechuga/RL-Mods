@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace Audio
 {
@@ -10,19 +11,21 @@ namespace Audio
         constexpr int DEFAULT_REFERENCE_HZ = 440;
         constexpr float PI = 3.14159265358979323846f;
 
-        constexpr float LOW_DELAY_MS = 3.0f;
-        constexpr float CENTER_DELAY_MS = 9.0f;
-        constexpr float HIGH_DELAY_MS = 15.0f;
+        // Short grains keep the added delay close to the old shifter while
+        // four-way overlap removes the obvious two-head amplitude pulse.
+        constexpr float GRAIN_MS = 10.0f;
 
-        constexpr float CROSSFADE_MS = 1.5f;
+        // Search only a small neighborhood when a grain is restarted.
+        // This is a WSOLA-style alignment step: choose a nearby source
+        // position that best matches the tail we just produced.
+        constexpr float SEARCH_MS = 0.70f;
+        constexpr float CORRELATION_MS = 1.35f;
+
         constexpr float RATIO_SLEW_MS = 12.0f;
-        constexpr float WET_RAMP_MS = 6.0f;
+        constexpr float WET_RAMP_MS = 8.0f;
 
-        constexpr float MIN_TRACK_HZ = 55.0f;
-        constexpr float MAX_TRACK_HZ = 1200.0f;
-
-        constexpr float CROSSING_SLOPE_FLOOR = 0.00025f;
-        constexpr float PERIOD_CHANGE_LIMIT = 0.35f;
+        constexpr double MIN_READ_DELAY = 2.0;
+        constexpr float EPSILON = 1.0e-12f;
     }
 
     RealtimePitchShifter::RealtimePitchShifter(int semitones)
@@ -37,16 +40,16 @@ namespace Audio
         if (referenceHz < 1)
             referenceHz = DEFAULT_REFERENCE_HZ;
 
-        const float coarse =
+        const float semitoneRatio =
             std::pow(
                 2.0f,
                 static_cast<float>(semitones) / 12.0f);
 
-        const float reference =
+        const float referenceRatio =
             static_cast<float>(referenceHz) /
             static_cast<float>(DEFAULT_REFERENCE_HZ);
 
-        return coarse * reference;
+        return semitoneRatio * referenceRatio;
     }
 
     void RealtimePitchShifter::SetSemitones(int semitones)
@@ -99,26 +102,62 @@ namespace Audio
                 ? format.sampleRate
                 : 48000;
 
-        lowDelay =
-            static_cast<double>(sampleRate) *
-            LOW_DELAY_MS *
-            0.001;
+        grainFrames =
+            std::clamp<std::uint32_t>(
+                static_cast<std::uint32_t>(
+                    static_cast<double>(sampleRate) *
+                    GRAIN_MS *
+                    0.001),
+                256,
+                768);
 
-        centerDelay =
-            static_cast<double>(sampleRate) *
-            CENTER_DELAY_MS *
-            0.001;
+        // Four grains at 75% overlap.
+        hopFrames =
+            std::max<std::uint32_t>(
+                1,
+                grainFrames /
+                static_cast<std::uint32_t>(GRAIN_COUNT));
 
-        highDelay =
-            static_cast<double>(sampleRate) *
-            HIGH_DELAY_MS *
-            0.001;
+        // Keep grainFrames an exact multiple of four so the phases remain
+        // evenly staggered forever.
+        grainFrames =
+            hopFrames *
+            static_cast<std::uint32_t>(GRAIN_COUNT);
+
+        searchRadius =
+            std::clamp<std::uint32_t>(
+                static_cast<std::uint32_t>(
+                    static_cast<double>(sampleRate) *
+                    SEARCH_MS *
+                    0.001),
+                16,
+                48);
+
+        correlationFrames =
+            std::clamp<std::uint32_t>(
+                static_cast<std::uint32_t>(
+                    static_cast<double>(sampleRate) *
+                    CORRELATION_MS *
+                    0.001),
+                32,
+                static_cast<std::uint32_t>(
+                    OUTPUT_TAIL_SIZE));
+
+        // The source is always safely in the past. This is the shifted-path
+        // latency; neutral E/A440 never uses it for audible output.
+        baseDelay =
+            static_cast<double>(
+                grainFrames +
+                searchRadius +
+                24);
 
         const std::uint32_t requiredHistory =
             static_cast<std::uint32_t>(
-                highDelay +
-                static_cast<double>(sampleRate) * 0.030 +
-                32.0);
+                baseDelay +
+                static_cast<double>(grainFrames) * 0.35 +
+                searchRadius +
+                correlationFrames +
+                64);
 
         const std::uint32_t historySize =
             NextPowerOfTwo(
@@ -130,18 +169,19 @@ namespace Audio
         historyMask = historySize - 1;
         writeIndex = 0;
 
-        readDelay = centerDelay;
-        oldReadDelay = centerDelay;
+        outputTail.fill(0.0f);
+        outputTailWrite = 0;
+        outputTailCount = 0;
 
-        crossfadeLength =
-            std::max<std::uint32_t>(
-                16,
-                static_cast<std::uint32_t>(
-                    static_cast<double>(sampleRate) *
-                    CROSSFADE_MS *
-                    0.001));
+        for (std::size_t i = 0; i < GRAIN_COUNT; ++i)
+        {
+            grains[i].age =
+                static_cast<std::uint32_t>(i) *
+                hopFrames;
 
-        crossfadeRemaining = 0;
+            grains[i].anchorDelay =
+                baseDelay;
+        }
 
         currentRatio =
             targetRatio.load(
@@ -163,17 +203,10 @@ namespace Audio
                 WET_RAMP_MS *
                 0.001f);
 
-        wetMix = IsNeutral() ? 0.0f : 1.0f;
-
-        previousInput = 0.0f;
-        sampleCounter = 0;
-        lastPositiveCrossing = 0;
-
-        estimatedPeriod =
-            static_cast<double>(sampleRate) / 200.0;
-
-        periodCandidate = estimatedPeriod;
-        periodCandidateCount = 0;
+        wetMix =
+            IsNeutral()
+                ? 0.0f
+                : 1.0f;
     }
 
     float RealtimePitchShifter::ReadHistory(
@@ -185,7 +218,7 @@ namespace Audio
         delayFrames =
             std::clamp(
                 delayFrames,
-                1.0,
+                MIN_READ_DELAY,
                 static_cast<double>(
                     history.size() - 2));
 
@@ -198,139 +231,154 @@ namespace Audio
                 static_cast<double>(
                     history.size());
 
-        const double base =
+        const double integral =
             std::floor(position);
 
-        const std::uint32_t i0 =
-            static_cast<std::uint32_t>(base) &
+        const std::uint32_t index0 =
+            static_cast<std::uint32_t>(
+                integral) &
             historyMask;
 
-        const std::uint32_t i1 =
-            (i0 + 1) &
+        const std::uint32_t index1 =
+            (index0 + 1) &
             historyMask;
 
         const float fraction =
             static_cast<float>(
-                position - base);
+                position - integral);
 
         return
-            history[i0] +
-            (history[i1] - history[i0]) *
+            history[index0] +
+            (history[index1] -
+             history[index0]) *
                 fraction;
     }
 
-    void RealtimePitchShifter::TrackPeriod(float sample)
+    float RealtimePitchShifter::GrainWindow(
+        std::uint32_t age) const
     {
-        ++sampleCounter;
+        const float phase =
+            (static_cast<float>(age) + 0.5f) /
+            static_cast<float>(grainFrames);
 
-        const float slope =
-            sample - previousInput;
+        const float sine =
+            std::sin(PI * phase);
 
-        const bool positiveCrossing =
-            previousInput <= 0.0f &&
-            sample > 0.0f &&
-            slope > CROSSING_SLOPE_FLOOR;
-
-        previousInput = sample;
-
-        if (!positiveCrossing)
-            return;
-
-        if (lastPositiveCrossing == 0)
-        {
-            lastPositiveCrossing = sampleCounter;
-            return;
-        }
-
-        const std::uint64_t interval =
-            sampleCounter -
-            lastPositiveCrossing;
-
-        lastPositiveCrossing = sampleCounter;
-
-        const double minPeriod =
-            static_cast<double>(sampleRate) /
-            MAX_TRACK_HZ;
-
-        const double maxPeriod =
-            static_cast<double>(sampleRate) /
-            MIN_TRACK_HZ;
-
-        if (interval <
-                static_cast<std::uint64_t>(minPeriod) ||
-            interval >
-                static_cast<std::uint64_t>(maxPeriod))
-        {
-            return;
-        }
-
-        const double measured =
-            static_cast<double>(interval);
-
-        const double lower =
-            estimatedPeriod *
-            (1.0 - PERIOD_CHANGE_LIMIT);
-
-        const double upper =
-            estimatedPeriod *
-            (1.0 + PERIOD_CHANGE_LIMIT);
-
-        if (measured >= lower &&
-            measured <= upper)
-        {
-            estimatedPeriod =
-                estimatedPeriod * 0.82 +
-                measured * 0.18;
-
-            periodCandidateCount = 0;
-            return;
-        }
-
-        const double candidateTolerance =
-            std::max(
-                4.0,
-                periodCandidate * 0.12);
-
-        if (std::fabs(
-                measured -
-                periodCandidate) <=
-            candidateTolerance)
-        {
-            periodCandidate =
-                periodCandidate * 0.6 +
-                measured * 0.4;
-
-            ++periodCandidateCount;
-
-            if (periodCandidateCount >= 3)
-            {
-                estimatedPeriod =
-                    periodCandidate;
-
-                periodCandidateCount = 0;
-            }
-        }
-        else
-        {
-            periodCandidate = measured;
-            periodCandidateCount = 1;
-        }
+        return sine * sine;
     }
 
-    void RealtimePitchShifter::BeginDelayJump(
-        double newDelay)
+    void RealtimePitchShifter::PushOutputTail(float sample)
     {
-        newDelay =
-            std::clamp(
-                newDelay,
-                lowDelay,
-                highDelay);
+        outputTail[outputTailWrite] = sample;
 
-        oldReadDelay = readDelay;
-        readDelay = newDelay;
+        outputTailWrite =
+            (outputTailWrite + 1) %
+            OUTPUT_TAIL_SIZE;
 
-        crossfadeRemaining =
-            crossfadeLength;
+        if (outputTailCount < OUTPUT_TAIL_SIZE)
+            ++outputTailCount;
+    }
+
+    float RealtimePitchShifter::ReadOutputTail(
+        std::size_t indexFromOldest) const
+    {
+        if (outputTailCount == 0)
+            return 0.0f;
+
+        const std::size_t count =
+            outputTailCount;
+
+        if (indexFromOldest >= count)
+            indexFromOldest = count - 1;
+
+        const std::size_t oldest =
+            (outputTailWrite +
+             OUTPUT_TAIL_SIZE -
+             count) %
+            OUTPUT_TAIL_SIZE;
+
+        return outputTail[
+            (oldest + indexFromOldest) %
+            OUTPUT_TAIL_SIZE];
+    }
+
+    double RealtimePitchShifter::FindAlignedDelay() const
+    {
+        if (outputTailCount <
+            correlationFrames)
+        {
+            return baseDelay;
+        }
+
+        double bestDelay = baseDelay;
+        float bestScore =
+            -std::numeric_limits<float>::infinity();
+
+        for (int offset =
+                 -static_cast<int>(searchRadius);
+             offset <=
+                 static_cast<int>(searchRadius);
+             ++offset)
+        {
+            const double candidateDelay =
+                baseDelay +
+                static_cast<double>(offset);
+
+            float dot = 0.0f;
+            float sourceEnergy = 0.0f;
+            float outputEnergy = 0.0f;
+
+            for (std::uint32_t n = 0;
+                 n < correlationFrames;
+                 ++n)
+            {
+                // Oldest -> newest tail sample.
+                const float produced =
+                    ReadOutputTail(
+                        outputTailCount -
+                        correlationFrames +
+                        n);
+
+                // Match a source segment ending at candidateDelay.
+                const double delay =
+                    candidateDelay +
+                    static_cast<double>(
+                        correlationFrames - 1 - n);
+
+                const float source =
+                    ReadHistory(delay);
+
+                dot += source * produced;
+                sourceEnergy += source * source;
+                outputEnergy += produced * produced;
+            }
+
+            const float denominator =
+                std::sqrt(
+                    sourceEnergy *
+                    outputEnergy +
+                    EPSILON);
+
+            const float score =
+                denominator > EPSILON
+                    ? dot / denominator
+                    : 0.0f;
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestDelay = candidateDelay;
+            }
+        }
+
+        return bestDelay;
+    }
+
+    void RealtimePitchShifter::ResetGrain(Grain& grain)
+    {
+        grain.age = 0;
+        grain.anchorDelay =
+            FindAlignedDelay();
     }
 
     void RealtimePitchShifter::Process(
@@ -351,14 +399,15 @@ namespace Audio
             neutral.load(
                 std::memory_order_relaxed);
 
-        for (std::uint32_t i = 0;
-             i < frameCount;
-             ++i)
+        for (std::uint32_t frame = 0;
+             frame < frameCount;
+             ++frame)
         {
-            const float dry = samples[i];
+            const float dry =
+                samples[frame];
 
-            history[writeIndex] = dry;
-            TrackPeriod(dry);
+            history[writeIndex] =
+                dry;
 
             const float ratioDifference =
                 target -
@@ -377,106 +426,42 @@ namespace Audio
                         : -ratioStep;
             }
 
+            // A read delay that increases by (1-ratio) per sample causes
+            // the read position itself to advance at ratio samples/sample.
             const double drift =
                 1.0 -
                 static_cast<double>(
                     currentRatio);
 
-            readDelay += drift;
+            float sum = 0.0f;
+            float weightSum = 0.0f;
 
-            if (crossfadeRemaining > 0)
-                oldReadDelay += drift;
-
-            if (crossfadeRemaining == 0 &&
-                std::fabs(drift) >
-                    0.000001)
+            for (auto& grain : grains)
             {
-                const double safePeriod =
-                    std::clamp(
-                        estimatedPeriod,
-                        static_cast<double>(
-                            sampleRate) /
-                            MAX_TRACK_HZ,
-                        static_cast<double>(
-                            sampleRate) /
-                            MIN_TRACK_HZ);
+                const float weight =
+                    GrainWindow(grain.age);
 
-                const double desiredJump =
-                    std::max(
-                        safePeriod,
-                        std::fabs(
-                            readDelay -
-                            centerDelay));
+                const double delay =
+                    grain.anchorDelay +
+                    drift *
+                    static_cast<double>(
+                        grain.age);
 
-                int periods =
-                    static_cast<int>(
-                        std::round(
-                            desiredJump /
-                            safePeriod));
+                sum +=
+                    ReadHistory(delay) *
+                    weight;
 
-                periods =
-                    std::clamp(
-                        periods,
-                        1,
-                        12);
-
-                const double jump =
-                    safePeriod *
-                    static_cast<double>(periods);
-
-                if (drift > 0.0 &&
-                    readDelay >= highDelay)
-                {
-                    BeginDelayJump(
-                        readDelay -
-                        jump);
-                }
-                else if (drift < 0.0 &&
-                         readDelay <= lowDelay)
-                {
-                    BeginDelayJump(
-                        readDelay +
-                        jump);
-                }
+                weightSum += weight;
             }
 
-            float wet = 0.0f;
+            const float wet =
+                weightSum > EPSILON
+                    ? sum / weightSum
+                    : dry;
 
-            if (crossfadeRemaining > 0)
-            {
-                const float progress =
-                    1.0f -
-                    static_cast<float>(
-                        crossfadeRemaining) /
-                    static_cast<float>(
-                        crossfadeLength);
-
-                const float newGain =
-                    std::sin(
-                        progress *
-                        PI *
-                        0.5f);
-
-                const float oldGain =
-                    std::cos(
-                        progress *
-                        PI *
-                        0.5f);
-
-                wet =
-                    ReadHistory(oldReadDelay) *
-                        oldGain +
-                    ReadHistory(readDelay) *
-                        newGain;
-
-                --crossfadeRemaining;
-            }
-            else
-            {
-                wet =
-                    ReadHistory(readDelay);
-            }
-
+            // At E Standard / A440 the audible path becomes the untouched
+            // input. The granular engine still runs so its history remains
+            // warm for the next tuning change.
             const float targetWet =
                 nowNeutral
                     ? 0.0f
@@ -499,10 +484,21 @@ namespace Audio
                         wetStep);
             }
 
-            samples[i] =
+            const float output =
                 dry +
                 (wet - dry) *
                     wetMix;
+
+            samples[frame] = output;
+            PushOutputTail(output);
+
+            for (auto& grain : grains)
+            {
+                ++grain.age;
+
+                if (grain.age >= grainFrames)
+                    ResetGrain(grain);
+            }
 
             writeIndex =
                 (writeIndex + 1) &
@@ -517,6 +513,6 @@ namespace Audio
             return 0;
 
         return static_cast<std::uint32_t>(
-            centerDelay);
+            baseDelay);
     }
 }
