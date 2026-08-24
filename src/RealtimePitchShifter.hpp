@@ -27,28 +27,40 @@ namespace Audio
         static std::uint32_t NextPowerOfTwo(std::uint32_t value);
 
         float ReadHistory(double delayFrames) const;
-        float RenderHead(double headPhase, double drift) const;
+        void TrackPeriod(float sample);
+        void BeginDelayJump(double newDelay);
 
         std::atomic<float> targetRatio{ 1.0f };
         std::atomic<bool> neutral{ true };
 
         std::vector<float> history;
-
         std::uint32_t historyMask = 0;
         std::uint32_t writeIndex = 0;
 
-        std::uint32_t minimumDelayFrames = 0;
-        std::uint32_t sweepFrames = 0;
-        std::uint32_t maximumDelayFrames = 0;
+        std::uint32_t sampleRate = 48000;
 
-        double phase = 0.0;
+        double readDelay = 0.0;
+        double oldReadDelay = 0.0;
+
+        double lowDelay = 0.0;
+        double centerDelay = 0.0;
+        double highDelay = 0.0;
 
         float currentRatio = 1.0f;
-        float ratioSlew = 1.0f;
+        float ratioStep = 1.0f;
+
+        std::uint32_t crossfadeLength = 0;
+        std::uint32_t crossfadeRemaining = 0;
 
         float wetMix = 0.0f;
         float wetStep = 1.0f;
 
-        bool wasNeutral = true;
+        float previousInput = 0.0f;
+        std::uint64_t sampleCounter = 0;
+        std::uint64_t lastPositiveCrossing = 0;
+
+        double estimatedPeriod = 240.0;
+        int periodCandidateCount = 0;
+        double periodCandidate = 0.0;
     };
 }

@@ -7,17 +7,22 @@ namespace Audio
 {
     namespace
     {
+        constexpr int DEFAULT_REFERENCE_HZ = 440;
         constexpr float PI = 3.14159265358979323846f;
 
-        constexpr float MIN_REFERENCE_HZ = 1.0f;
-        constexpr int DEFAULT_REFERENCE_HZ = 440;
+        constexpr float LOW_DELAY_MS = 3.0f;
+        constexpr float CENTER_DELAY_MS = 9.0f;
+        constexpr float HIGH_DELAY_MS = 15.0f;
 
-        constexpr float RATIO_SLEW_TIME_SECONDS = 0.020f;
-        constexpr float WET_RAMP_TIME_SECONDS = 0.010f;
+        constexpr float CROSSFADE_MS = 1.5f;
+        constexpr float RATIO_SLEW_MS = 12.0f;
+        constexpr float WET_RAMP_MS = 6.0f;
 
-        constexpr float MIN_DELAY_MS = 2.0f;
-        constexpr float SWEEP_MS = 12.0f;
-        constexpr float MAX_DELAY_MARGIN_MS = 2.0f;
+        constexpr float MIN_TRACK_HZ = 55.0f;
+        constexpr float MAX_TRACK_HZ = 1200.0f;
+
+        constexpr float CROSSING_SLOPE_FLOOR = 0.00025f;
+        constexpr float PERIOD_CHANGE_LIMIT = 0.35f;
     }
 
     RealtimePitchShifter::RealtimePitchShifter(int semitones)
@@ -29,19 +34,19 @@ namespace Audio
         int semitones,
         int referenceHz)
     {
-        if (referenceHz < static_cast<int>(MIN_REFERENCE_HZ))
+        if (referenceHz < 1)
             referenceHz = DEFAULT_REFERENCE_HZ;
 
-        const float semitoneRatio =
+        const float coarse =
             std::pow(
                 2.0f,
                 static_cast<float>(semitones) / 12.0f);
 
-        const float referenceRatio =
+        const float reference =
             static_cast<float>(referenceHz) /
             static_cast<float>(DEFAULT_REFERENCE_HZ);
 
-        return semitoneRatio * referenceRatio;
+        return coarse * reference;
     }
 
     void RealtimePitchShifter::SetSemitones(int semitones)
@@ -53,11 +58,11 @@ namespace Audio
         int semitones,
         int referenceHz)
     {
-        const float ratio =
-            RatioForTuning(semitones, referenceHz);
+        if (referenceHz < 1)
+            referenceHz = DEFAULT_REFERENCE_HZ;
 
         targetRatio.store(
-            ratio,
+            RatioForTuning(semitones, referenceHz),
             std::memory_order_relaxed);
 
         neutral.store(
@@ -78,79 +83,97 @@ namespace Audio
             return 1;
 
         --value;
-
         value |= value >> 1;
         value |= value >> 2;
         value |= value >> 4;
         value |= value >> 8;
         value |= value >> 16;
-
         return value + 1;
     }
 
     void RealtimePitchShifter::Prepare(
         const CaptureFormat& format)
     {
-        const float sampleRate =
-            static_cast<float>(format.sampleRate);
+        sampleRate =
+            format.sampleRate > 0
+                ? format.sampleRate
+                : 48000;
 
-        minimumDelayFrames =
+        lowDelay =
+            static_cast<double>(sampleRate) *
+            LOW_DELAY_MS *
+            0.001;
+
+        centerDelay =
+            static_cast<double>(sampleRate) *
+            CENTER_DELAY_MS *
+            0.001;
+
+        highDelay =
+            static_cast<double>(sampleRate) *
+            HIGH_DELAY_MS *
+            0.001;
+
+        const std::uint32_t requiredHistory =
             static_cast<std::uint32_t>(
-                sampleRate * MIN_DELAY_MS * 0.001f);
-
-        sweepFrames =
-            static_cast<std::uint32_t>(
-                sampleRate * SWEEP_MS * 0.001f);
-
-        const std::uint32_t marginFrames =
-            static_cast<std::uint32_t>(
-                sampleRate *
-                MAX_DELAY_MARGIN_MS *
-                0.001f);
-
-        maximumDelayFrames =
-            minimumDelayFrames +
-            sweepFrames +
-            marginFrames;
+                highDelay +
+                static_cast<double>(sampleRate) * 0.030 +
+                32.0);
 
         const std::uint32_t historySize =
             NextPowerOfTwo(
-                maximumDelayFrames + 8);
+                std::max<std::uint32_t>(
+                    requiredHistory,
+                    2048));
 
-        history.assign(
-            historySize,
-            0.0f);
-
-        historyMask =
-            historySize - 1;
-
+        history.assign(historySize, 0.0f);
+        historyMask = historySize - 1;
         writeIndex = 0;
-        phase = 0.0;
+
+        readDelay = centerDelay;
+        oldReadDelay = centerDelay;
+
+        crossfadeLength =
+            std::max<std::uint32_t>(
+                16,
+                static_cast<std::uint32_t>(
+                    static_cast<double>(sampleRate) *
+                    CROSSFADE_MS *
+                    0.001));
+
+        crossfadeRemaining = 0;
 
         currentRatio =
             targetRatio.load(
                 std::memory_order_relaxed);
 
-        const float slewSamples =
+        ratioStep =
+            1.0f /
             std::max(
                 1.0f,
-                sampleRate *
-                RATIO_SLEW_TIME_SECONDS);
-
-        ratioSlew =
-            1.0f / slewSamples;
-
-        const float wetRampSamples =
-            std::max(
-                1.0f,
-                sampleRate *
-                WET_RAMP_TIME_SECONDS);
+                static_cast<float>(sampleRate) *
+                RATIO_SLEW_MS *
+                0.001f);
 
         wetStep =
-            1.0f / wetRampSamples;
+            1.0f /
+            std::max(
+                1.0f,
+                static_cast<float>(sampleRate) *
+                WET_RAMP_MS *
+                0.001f);
 
-        wasNeutral = IsNeutral();
-        wetMix = wasNeutral ? 0.0f : 1.0f;
+        wetMix = IsNeutral() ? 0.0f : 1.0f;
+
+        previousInput = 0.0f;
+        sampleCounter = 0;
+        lastPositiveCrossing = 0;
+
+        estimatedPeriod =
+            static_cast<double>(sampleRate) / 200.0;
+
+        periodCandidate = estimatedPeriod;
+        periodCandidateCount = 0;
     }
 
     float RealtimePitchShifter::ReadHistory(
@@ -162,65 +185,163 @@ namespace Audio
         delayFrames =
             std::clamp(
                 delayFrames,
+                1.0,
                 static_cast<double>(
-                    minimumDelayFrames),
-                static_cast<double>(
-                    maximumDelayFrames));
+                    history.size() - 2));
 
-        double readPosition =
+        double position =
             static_cast<double>(writeIndex) -
             delayFrames;
 
-        while (readPosition < 0.0)
-            readPosition +=
+        while (position < 0.0)
+            position +=
                 static_cast<double>(
                     history.size());
 
-        const std::uint32_t index0 =
-            static_cast<std::uint32_t>(
-                readPosition) &
+        const double base =
+            std::floor(position);
+
+        const std::uint32_t i0 =
+            static_cast<std::uint32_t>(base) &
             historyMask;
 
-        const std::uint32_t index1 =
-            (index0 + 1) &
+        const std::uint32_t i1 =
+            (i0 + 1) &
             historyMask;
 
         const float fraction =
             static_cast<float>(
-                readPosition -
-                std::floor(readPosition));
+                position - base);
 
         return
-            history[index0] +
-            (history[index1] -
-             history[index0]) *
+            history[i0] +
+            (history[i1] - history[i0]) *
                 fraction;
     }
 
-    float RealtimePitchShifter::RenderHead(
-        double headPhase,
-        double drift) const
+    void RealtimePitchShifter::TrackPeriod(float sample)
     {
-        const double wrapped =
-            headPhase -
-            std::floor(headPhase);
+        ++sampleCounter;
 
-        const double delay =
-            static_cast<double>(
-                minimumDelayFrames) +
-            wrapped *
-            static_cast<double>(
-                sweepFrames);
+        const float slope =
+            sample - previousInput;
 
-        return ReadHistory(delay);
+        const bool positiveCrossing =
+            previousInput <= 0.0f &&
+            sample > 0.0f &&
+            slope > CROSSING_SLOPE_FLOOR;
+
+        previousInput = sample;
+
+        if (!positiveCrossing)
+            return;
+
+        if (lastPositiveCrossing == 0)
+        {
+            lastPositiveCrossing = sampleCounter;
+            return;
+        }
+
+        const std::uint64_t interval =
+            sampleCounter -
+            lastPositiveCrossing;
+
+        lastPositiveCrossing = sampleCounter;
+
+        const double minPeriod =
+            static_cast<double>(sampleRate) /
+            MAX_TRACK_HZ;
+
+        const double maxPeriod =
+            static_cast<double>(sampleRate) /
+            MIN_TRACK_HZ;
+
+        if (interval <
+                static_cast<std::uint64_t>(minPeriod) ||
+            interval >
+                static_cast<std::uint64_t>(maxPeriod))
+        {
+            return;
+        }
+
+        const double measured =
+            static_cast<double>(interval);
+
+        const double lower =
+            estimatedPeriod *
+            (1.0 - PERIOD_CHANGE_LIMIT);
+
+        const double upper =
+            estimatedPeriod *
+            (1.0 + PERIOD_CHANGE_LIMIT);
+
+        if (measured >= lower &&
+            measured <= upper)
+        {
+            estimatedPeriod =
+                estimatedPeriod * 0.82 +
+                measured * 0.18;
+
+            periodCandidateCount = 0;
+            return;
+        }
+
+        const double candidateTolerance =
+            std::max(
+                4.0,
+                periodCandidate * 0.12);
+
+        if (std::fabs(
+                measured -
+                periodCandidate) <=
+            candidateTolerance)
+        {
+            periodCandidate =
+                periodCandidate * 0.6 +
+                measured * 0.4;
+
+            ++periodCandidateCount;
+
+            if (periodCandidateCount >= 3)
+            {
+                estimatedPeriod =
+                    periodCandidate;
+
+                periodCandidateCount = 0;
+            }
+        }
+        else
+        {
+            periodCandidate = measured;
+            periodCandidateCount = 1;
+        }
+    }
+
+    void RealtimePitchShifter::BeginDelayJump(
+        double newDelay)
+    {
+        newDelay =
+            std::clamp(
+                newDelay,
+                lowDelay,
+                highDelay);
+
+        oldReadDelay = readDelay;
+        readDelay = newDelay;
+
+        crossfadeRemaining =
+            crossfadeLength;
     }
 
     void RealtimePitchShifter::Process(
         float* samples,
         std::uint32_t frameCount)
     {
-        if (!samples || history.empty())
+        if (!samples ||
+            history.empty())
+        {
             return;
+        }
 
         const float target =
             targetRatio.load(
@@ -230,34 +351,30 @@ namespace Audio
             neutral.load(
                 std::memory_order_relaxed);
 
-        if (nowNeutral != wasNeutral)
-            wasNeutral = nowNeutral;
-
         for (std::uint32_t i = 0;
              i < frameCount;
              ++i)
         {
-            const float dry =
-                samples[i];
+            const float dry = samples[i];
 
-            history[writeIndex] =
-                dry;
+            history[writeIndex] = dry;
+            TrackPeriod(dry);
 
-            const float difference =
-                target - currentRatio;
+            const float ratioDifference =
+                target -
+                currentRatio;
 
-            if (std::fabs(difference) <=
-                ratioSlew)
+            if (std::fabs(ratioDifference) <=
+                ratioStep)
             {
-                currentRatio =
-                    target;
+                currentRatio = target;
             }
             else
             {
                 currentRatio +=
-                    difference > 0.0f
-                        ? ratioSlew
-                        : -ratioSlew;
+                    ratioDifference > 0.0f
+                        ? ratioStep
+                        : -ratioStep;
             }
 
             const double drift =
@@ -265,80 +382,121 @@ namespace Audio
                 static_cast<double>(
                     currentRatio);
 
-            phase +=
-                drift /
-                static_cast<double>(
-                    sweepFrames);
+            readDelay += drift;
 
-            phase -=
-                std::floor(phase);
+            if (crossfadeRemaining > 0)
+                oldReadDelay += drift;
 
-            const double phaseA =
-                phase;
+            if (crossfadeRemaining == 0 &&
+                std::fabs(drift) >
+                    0.000001)
+            {
+                const double safePeriod =
+                    std::clamp(
+                        estimatedPeriod,
+                        static_cast<double>(
+                            sampleRate) /
+                            MAX_TRACK_HZ,
+                        static_cast<double>(
+                            sampleRate) /
+                            MIN_TRACK_HZ);
 
-            double phaseB =
-                phase + 0.5;
+                const double desiredJump =
+                    std::max(
+                        safePeriod,
+                        std::fabs(
+                            readDelay -
+                            centerDelay));
 
-            if (phaseB >= 1.0)
-                phaseB -= 1.0;
+                int periods =
+                    static_cast<int>(
+                        std::round(
+                            desiredJump /
+                            safePeriod));
 
-            const float headA =
-                RenderHead(
-                    phaseA,
-                    drift);
+                periods =
+                    std::clamp(
+                        periods,
+                        1,
+                        12);
 
-            const float headB =
-                RenderHead(
-                    phaseB,
-                    drift);
+                const double jump =
+                    safePeriod *
+                    static_cast<double>(periods);
 
-            const float windowA =
-                0.5f -
-                0.5f *
-                std::cos(
-                    2.0f *
-                    PI *
-                    static_cast<float>(
-                        phaseA));
-
-            const float windowB =
-                0.5f -
-                0.5f *
-                std::cos(
-                    2.0f *
-                    PI *
-                    static_cast<float>(
-                        phaseB));
-
-            const float weightSum =
-                windowA + windowB;
+                if (drift > 0.0 &&
+                    readDelay >= highDelay)
+                {
+                    BeginDelayJump(
+                        readDelay -
+                        jump);
+                }
+                else if (drift < 0.0 &&
+                         readDelay <= lowDelay)
+                {
+                    BeginDelayJump(
+                        readDelay +
+                        jump);
+                }
+            }
 
             float wet = 0.0f;
 
-            if (weightSum > 0.000001f)
+            if (crossfadeRemaining > 0)
+            {
+                const float progress =
+                    1.0f -
+                    static_cast<float>(
+                        crossfadeRemaining) /
+                    static_cast<float>(
+                        crossfadeLength);
+
+                const float newGain =
+                    std::sin(
+                        progress *
+                        PI *
+                        0.5f);
+
+                const float oldGain =
+                    std::cos(
+                        progress *
+                        PI *
+                        0.5f);
+
+                wet =
+                    ReadHistory(oldReadDelay) *
+                        oldGain +
+                    ReadHistory(readDelay) *
+                        newGain;
+
+                --crossfadeRemaining;
+            }
+            else
             {
                 wet =
-                    (headA * windowA +
-                     headB * windowB) /
-                    weightSum;
+                    ReadHistory(readDelay);
             }
 
             const float targetWet =
-                nowNeutral ? 0.0f : 1.0f;
+                nowNeutral
+                    ? 0.0f
+                    : 1.0f;
 
             if (wetMix < targetWet)
             {
                 wetMix =
                     std::min(
                         targetWet,
-                        wetMix + wetStep);
+                        wetMix +
+                        wetStep);
             }
             else if (wetMix > targetWet)
             {
                 wetMix =
                     std::max(
                         targetWet,
-                        wetMix - wetStep);
+                        wetMix -
+                        wetStep);
             }
 
             samples[i] =
@@ -358,6 +516,7 @@ namespace Audio
         if (IsNeutral())
             return 0;
 
-        return minimumDelayFrames;
+        return static_cast<std::uint32_t>(
+            centerDelay);
     }
 }
