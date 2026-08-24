@@ -87,7 +87,7 @@ namespace AsioPassthrough
             bool active = false;
 
             std::vector<float> conversionBuffer;
-            Audio::RealtimePitchShifter shifter{ 0 };};
+            Audio::RealtimePitchShifter shifter{ 0 };
         };
 
         CreateInstance_t originalCreateInstance = nullptr;
