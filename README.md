@@ -43,4 +43,14 @@ Pitch shifting may produce occasional low-level splice artifacts depending on th
 
 ## Credits
 
-RSMods-Min builds on research and work from the Rocksmith modding community, particularly RSMods, RSModsPlus, and RS_ASIO.
+RSMods-Min builds on research and work from the Rocksmith modding community.
+
+In particular:
+
+- **RSMods** — inspiration and prior research around Rocksmith modding and song re-enumeration
+- **RS_ASIO** — ASIO support for Rocksmith 2014
+- **Stephan M. Bernsee** — `smbPitchShift` DSP algorithm, used under the Wide Open License
+
+RSMods-Min's integration code, ASIO interception, multiplayer handling, tuning controls, OSD, and enumeration implementation are original to this project.
+
+See `THIRD_PARTY-NOTICES.txt` for third-party licensing details.
