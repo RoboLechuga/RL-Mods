@@ -1,0 +1,28 @@
+THIRD-PARTY NOTICES
+===================
+
+Stephan M. Bernsee - smbPitchShift
+----------------------------------
+
+RSMods-Min's RealtimePitchShifter uses a refactored, per-instance adaptation
+of Stephan M. Bernsee's classic smbPitchShift STFT pitch-shifting algorithm.
+
+Original source and article:
+https://blogs.zynaptiq.com/bernsee/
+
+Copyright 1999-2009 Stephan M. Bernsee
+
+The Wide Open License (WOL)
+
+Permission to use, copy, modify, distribute and sell this software and its
+documentation for any purpose is hereby granted without fee, provided that
+the above copyright notice and this license appear in all source copies.
+THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT EXPRESS OR IMPLIED WARRANTY OF
+ANY KIND. See http://www.dspguru.com/wol.htm for more information.
+
+RSMods-Min changes include:
+- Moving the original process-global static DSP state into each shifter object.
+- Supporting independent shifter state for multiplayer inputs.
+- Integrating Rocksmith semitone/reference-frequency controls.
+- Providing a true dry output path for E Standard at A440.
+- Smoothing tuning and bypass transitions.
