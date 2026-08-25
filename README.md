@@ -1,6 +1,6 @@
-# RSMods-Min v0.9.0 RC1
+# RSMods-Min v1.0.0
 
-Initial release candidate for testing with the Rocksmith Championship community.
+First stable release for the Rocksmith Championship community.
 
 ## Features
 
@@ -10,7 +10,7 @@ Initial release candidate for testing with the Rocksmith Championship community.
 - Alternate tuning reference from A420 through A461
 - Small on-screen tuning display
 - Two-player / multiplayer ASIO input support
-- Minimal `xinput1_3.dll` proxy with no RSMods GUI or unrelated features
+- Minimal `xinput1_3.dll` proxy with no GUI or unrelated features
 
 ## Requirements
 
