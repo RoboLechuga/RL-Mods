@@ -162,7 +162,7 @@ namespace Audio
         long i;
         long bitm;
         long j;
-        long le;
+        long le = 2;
         long le2;
 
         for (i = 2;
@@ -191,13 +191,17 @@ namespace Audio
             }
         }
 
-        const long max = 2 * frameSize;
+        long stages = 0;
+        for (long n = frameSize; n > 1; n >>= 1)
+            ++stages;
 
-        for (le = 2;
-             le < max;
-             le <<= 1)
+        for (long stage = 0;
+             stage < stages;
+             ++stage)
         {
+            le <<= 1;
             le2 = le >> 1;
+
             ur = 1.0f;
             ui = 0.0f;
 
@@ -216,7 +220,7 @@ namespace Audio
                  j += 2)
             {
                 for (i = j;
-                     i < max;
+                     i < 2 * frameSize;
                      i += le)
                 {
                     const long p1 = i;
@@ -240,15 +244,15 @@ namespace Audio
                     fftBuffer[p1 + 1] += ti;
                 }
 
-                tr = ur;
-
-                ur =
-                    tr * wr -
+                tr =
+                    ur * wr -
                     ui * wi;
 
                 ui =
-                    tr * wi +
+                    ur * wi +
                     ui * wr;
+
+                ur = tr;
             }
         }
     }
@@ -577,10 +581,26 @@ namespace Audio
                         wetStep);
             }
 
-            samples[i] =
-                dry +
-                (wet - dry) *
-                    wetMix;
+            if (nowNeutral)
+            {
+                // True neutral path: never let the DSP result participate in
+                // the audible sample at E Standard / A440. The shifter still
+                // runs above so its internal state remains warm.
+                samples[i] = dry;
+            }
+            else if (std::isfinite(wet))
+            {
+                samples[i] =
+                    dry +
+                    (wet - dry) *
+                        wetMix;
+            }
+            else
+            {
+                // Fail safe: a bad DSP value must never be written back to
+                // the ASIO input buffer.
+                samples[i] = dry;
+            }
         }
     }
 
