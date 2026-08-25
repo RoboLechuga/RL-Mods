@@ -39,7 +39,7 @@ If another mod already supplies `xinput1_3.dll`, back it up or remove it first.
 
 This is a release candidate intended for community testing.
 
-Pitch shifting may introduce a very small amount of chorusing or modulation depending on the signal and amount of pitch shift.
+Pitch shifting may introduce subtle processing artifacts depending on the signal and amount of pitch shift.
 
 ## Credits
 
