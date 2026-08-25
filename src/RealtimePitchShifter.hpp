@@ -5,10 +5,13 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
-#include <vector>
 
 namespace Audio
 {
+    // Stateful, per-player wrapper around the classic Stephan M. Bernsee
+    // STFT pitch-shifting algorithm. The DSP implementation is adapted under
+    // Bernsee's Wide Open License; see RealtimePitchShifter.cpp and
+    // THIRD_PARTY-NOTICES.txt.
     class RealtimePitchShifter final : public IInputProcessor
     {
     public:
@@ -24,53 +27,39 @@ namespace Audio
         std::uint32_t GetLatencyFrames() const override;
 
     private:
-        static constexpr std::size_t GRAIN_COUNT = 4;
-        static constexpr std::size_t OUTPUT_TAIL_SIZE = 128;
-
-        struct Grain
-        {
-            std::uint32_t age = 0;
-            double anchorDelay = 0.0;
-        };
+        static constexpr int FFT_SIZE = 1024;
+        static constexpr int OVERSAMPLE = 4;
+        static constexpr int HALF_FFT = FFT_SIZE / 2;
+        static constexpr int STEP_SIZE = FFT_SIZE / OVERSAMPLE;
+        static constexpr int FIFO_LATENCY = FFT_SIZE - STEP_SIZE;
 
         static float RatioForTuning(int semitones, int referenceHz);
-        static std::uint32_t NextPowerOfTwo(std::uint32_t value);
+        static void Fft(float* buffer, long frameSize, long sign);
 
-        float ReadHistory(double delayFrames) const;
-        float GrainWindow(std::uint32_t age) const;
-
-        double FindAlignedDelay() const;
-        void ResetGrain(Grain& grain);
-
-        void PushOutputTail(float sample);
-        float ReadOutputTail(std::size_t indexFromOldest) const;
+        float ProcessOne(float input, float pitchRatio);
+        void ResetState();
 
         std::atomic<float> targetRatio{ 1.0f };
         std::atomic<bool> neutral{ true };
 
-        std::vector<float> history;
-        std::uint32_t historyMask = 0;
-        std::uint32_t writeIndex = 0;
-
-        std::uint32_t sampleRate = 48000;
-
-        std::uint32_t grainFrames = 480;
-        std::uint32_t hopFrames = 120;
-        std::uint32_t searchRadius = 32;
-        std::uint32_t correlationFrames = 64;
-
-        double baseDelay = 540.0;
-
-        std::array<Grain, GRAIN_COUNT> grains{};
-
-        std::array<float, OUTPUT_TAIL_SIZE> outputTail{};
-        std::size_t outputTailWrite = 0;
-        std::size_t outputTailCount = 0;
-
+        float sampleRate = 48000.0f;
         float currentRatio = 1.0f;
         float ratioStep = 1.0f;
 
         float wetMix = 0.0f;
         float wetStep = 1.0f;
+
+        long rover = FIFO_LATENCY;
+
+        std::array<float, FFT_SIZE> inputFifo{};
+        std::array<float, FFT_SIZE> outputFifo{};
+        std::array<float, 2 * FFT_SIZE> fftWorkspace{};
+        std::array<float, HALF_FFT + 1> lastPhase{};
+        std::array<float, HALF_FFT + 1> sumPhase{};
+        std::array<float, 2 * FFT_SIZE> outputAccum{};
+        std::array<float, FFT_SIZE> analysisFrequency{};
+        std::array<float, FFT_SIZE> analysisMagnitude{};
+        std::array<float, FFT_SIZE> synthesisFrequency{};
+        std::array<float, FFT_SIZE> synthesisMagnitude{};
     };
 }
