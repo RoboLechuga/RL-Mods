@@ -1,6 +1,6 @@
-# RSMods-Min v0.9.0 RC1
+# RSMods-Min v1.0.0
 
-Initial release candidate for testing with the Rocksmith Championship community.
+First stable release for the Rocksmith Championship community.
 
 ## Features
 
@@ -10,7 +10,7 @@ Initial release candidate for testing with the Rocksmith Championship community.
 - Alternate tuning reference from A420 through A461
 - Small on-screen tuning display
 - Two-player / multiplayer ASIO input support
-- Minimal `xinput1_3.dll` proxy with no RSMods GUI or unrelated features
+- Minimal `xinput1_3.dll` proxy with no GUI or unrelated features
 
 ## Requirements
 
@@ -39,8 +39,18 @@ If another mod already supplies `xinput1_3.dll`, back it up or remove it first.
 
 This is a release candidate intended for community testing.
 
-Pitch shifting may produce occasional low-level splice artifacts depending on the signal and amount of pitch shift.
+Pitch shifting may introduce subtle processing artifacts depending on the signal and amount of pitch shift.
 
 ## Credits
 
-RSMods-Min builds on research and work from the Rocksmith modding community, particularly RSMods, RSModsPlus, and RS_ASIO.
+RSMods-Min builds on research and work from the Rocksmith modding community.
+
+In particular:
+
+- **RSMods** — inspiration and prior research around Rocksmith modding and song re-enumeration
+- **RS_ASIO** — ASIO support for Rocksmith 2014
+- **Stephan M. Bernsee** — `smbPitchShift` DSP algorithm, used under the Wide Open License
+
+RSMods-Min's integration code, ASIO interception, multiplayer handling, tuning controls, OSD, and enumeration implementation are original to this project.
+
+See `THIRD_PARTY-NOTICES.txt` for third-party licensing details.
