@@ -433,8 +433,9 @@ namespace Audio
                 static_cast<float>(k) *
                 expectedPhase;
 
-            sumPhase[k] +=
-                frequency;
+            sumPhase[k] = std::remainder(
+                sumPhase[k] + frequency,
+                2.0f * PI);
 
             const float phase =
                 sumPhase[k];
