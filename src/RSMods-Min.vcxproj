@@ -53,6 +53,7 @@
   <ClCompile Include="AsioPassthrough.cpp" />
   <ClCompile Include="RealtimePitchShifter.cpp" />
   <ClCompile Include="TuningControl.cpp" />
+  <ClCompile Include="ScreenshotControl.cpp" />
 </ItemGroup>
 
 <ItemGroup>
@@ -61,6 +62,7 @@
   <ClInclude Include="IInputProcessor.hpp" />
   <ClInclude Include="RealtimePitchShifter.hpp" />
   <ClInclude Include="TuningControl.hpp" />
+  <ClInclude Include="ScreenshotControl.hpp" />
 </ItemGroup>
   <ItemGroup>
     <None Include="xinput1_3.def" />
