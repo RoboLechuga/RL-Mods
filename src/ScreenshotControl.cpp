@@ -148,6 +148,11 @@ namespace ScreenshotControl
                 return TRUE;
             if (GetWindow(hwnd, GW_OWNER) != nullptr)
                 return TRUE;
+            const LONG_PTR exStyle =
+            GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+
+            if (exStyle & WS_EX_TOOLWINDOW)
+            return TRUE;
 
             *reinterpret_cast<HWND*>(parameter) = hwnd;
             return FALSE;
