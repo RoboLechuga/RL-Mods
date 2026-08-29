@@ -255,7 +255,7 @@ namespace
                 ForceEnumeration();
             }
             
-            ScreenshotControl:Poll();
+            ScreenshotControl::Poll();
             TuningControl::Poll();
             Sleep(25);
         }
