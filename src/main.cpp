@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include "AsioPassthrough.hpp"
 #include "TuningControl.hpp"
+#include "ScreenshotControl.hpp"
 #include <windows.h>
 #include <Xinput.h>
 #include <cstdint>
@@ -242,6 +243,7 @@ namespace
         
         AsioPassthrough::Install();
         TuningControl::Initialize();
+        ScreenshotControl::Initialize();
         
         while (InterlockedCompareExchange(
             &g_running,
@@ -252,11 +254,12 @@ namespace
             {
                 ForceEnumeration();
             }
-
+            
+            ScreenshotControl:Poll();
             TuningControl::Poll();
             Sleep(25);
         }
-
+        ScreenshotControl::Shutdown();
         TuningControl::Shutdown();
         return 0;
     }
