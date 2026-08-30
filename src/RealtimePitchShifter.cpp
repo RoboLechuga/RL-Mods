@@ -1,5 +1,5 @@
 /*
-    RSMods-Min realtime pitch shifter
+    RL-Mods' realtime pitch shifter
 
     DSP core adapted from Stephan M. Bernsee's smbPitchShift algorithm,
     version 1.2. It has been refactored here from process-global static state
