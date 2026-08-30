@@ -2,7 +2,6 @@
 #include "AsioPassthrough.hpp"
 #include "TuningControl.hpp"
 #include "ScreenshotControl.hpp"
-
 #include <windows.h>
 #include <Xinput.h>
 #include <cstdint>
@@ -33,7 +32,6 @@ namespace
             return true;
 
         char path[MAX_PATH] = {};
-
         if (!GetSystemDirectoryA(path, MAX_PATH))
             return false;
 
@@ -67,16 +65,13 @@ namespace
             return false;
 
         MEMORY_BASIC_INFORMATION mbi = {};
-
         if (!VirtualQuery(address, &mbi, sizeof(mbi)))
             return false;
 
         if (mbi.State != MEM_COMMIT)
             return false;
-
         if (mbi.Protect & PAGE_GUARD)
             return false;
-
         if (mbi.Protect & PAGE_NOACCESS)
             return false;
 
@@ -97,16 +92,13 @@ namespace
             return false;
 
         MEMORY_BASIC_INFORMATION mbi = {};
-
         if (!VirtualQuery(address, &mbi, sizeof(mbi)))
             return false;
 
         if (mbi.State != MEM_COMMIT)
             return false;
-
         if (mbi.Protect & PAGE_GUARD)
             return false;
-
         if (mbi.Protect & PAGE_NOACCESS)
             return false;
 
@@ -122,7 +114,6 @@ namespace
     std::uintptr_t ResolveEnumerationFlags()
     {
         HMODULE gameModule = GetModuleHandleW(nullptr);
-
         if (!gameModule)
             return 0;
 
@@ -135,7 +126,6 @@ namespace
             return 0;
 
         addr = *reinterpret_cast<std::uintptr_t*>(addr);
-
         if (!addr)
             return 0;
 
@@ -145,47 +135,28 @@ namespace
             return 0;
 
         addr = *reinterpret_cast<std::uintptr_t*>(addr);
-
         if (!addr)
             return 0;
 
         addr += 0x4;
-
         return addr;
     }
 
     void ForceEnumeration()
     {
         const std::uintptr_t flags = ResolveEnumerationFlags();
-
         if (!flags)
             return;
 
         BYTE* flag1 = reinterpret_cast<BYTE*>(flags);
         BYTE* flag2 = reinterpret_cast<BYTE*>(flags + 4);
 
-        if (!IsWritableAddress(flag1))
-            return;
-
-        if (!IsWritableAddress(flag2))
+        if (!IsWritableAddress(flag1) ||
+            !IsWritableAddress(flag2))
             return;
 
         *reinterpret_cast<volatile BYTE*>(flag1) = 1;
         *reinterpret_cast<volatile BYTE*>(flag2) = 1;
-    }
-
-    void ForceSteamScreenshot()
-    {
-        INPUT inputs[2] = {};
-
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].ki.wVk = VK_F12;
-
-        inputs[1].type = INPUT_KEYBOARD;
-        inputs[1].ki.wVk = VK_F12;
-        inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-
-        SendInput(2, inputs, sizeof(INPUT));
     }
 
     DWORD WINAPI WorkerThread(void*)
@@ -194,18 +165,16 @@ namespace
         TuningControl::Initialize();
         ScreenshotControl::Initialize();
 
-        while (InterlockedCompareExchange(&g_running, TRUE, TRUE))
+        while (InterlockedCompareExchange(
+            &g_running,
+            TRUE,
+            TRUE))
         {
             if (GetAsyncKeyState(VK_F8) & 1)
                 ForceEnumeration();
 
-            // Diagnostic: direct screenshot test outside ScreenshotControl.
-            if (GetAsyncKeyState(VK_F10) & 1)
-                ForceSteamScreenshot();
-
             ScreenshotControl::Poll();
             TuningControl::Poll();
-
             Sleep(25);
         }
 
@@ -232,9 +201,7 @@ extern "C"
     }
 
     DWORD __stdcall XInput_XInputGetBatteryInformation(
-        DWORD user,
-        BYTE devType,
-        XINPUT_BATTERY_INFORMATION* info)
+        DWORD user, BYTE devType, XINPUT_BATTERY_INFORMATION* info)
     {
         if (!InitRealXInput())
             return ERROR_DEVICE_NOT_CONNECTED;
@@ -244,9 +211,7 @@ extern "C"
     }
 
     DWORD __stdcall XInput_XInputGetCapabilities(
-        DWORD user,
-        DWORD flags,
-        XINPUT_CAPABILITIES* caps)
+        DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps)
     {
         if (!InitRealXInput())
             return ERROR_DEVICE_NOT_CONNECTED;
@@ -256,9 +221,7 @@ extern "C"
     }
 
     DWORD __stdcall XInput_XInputGetDSoundAudioDeviceGuids(
-        DWORD user,
-        GUID* renderGuid,
-        GUID* captureGuid)
+        DWORD user, GUID* renderGuid, GUID* captureGuid)
     {
         if (!InitRealXInput())
             return ERROR_DEVICE_NOT_CONNECTED;
@@ -268,9 +231,7 @@ extern "C"
     }
 
     DWORD __stdcall XInput_XInputGetKeystroke(
-        DWORD user,
-        DWORD reserved,
-        XINPUT_KEYSTROKE* key)
+        DWORD user, DWORD reserved, XINPUT_KEYSTROKE* key)
     {
         if (!InitRealXInput())
             return ERROR_DEVICE_NOT_CONNECTED;
@@ -280,8 +241,7 @@ extern "C"
     }
 
     DWORD __stdcall XInput_XInputGetState(
-        DWORD user,
-        XINPUT_STATE* state)
+        DWORD user, XINPUT_STATE* state)
     {
         if (!InitRealXInput())
             return ERROR_DEVICE_NOT_CONNECTED;
@@ -291,8 +251,7 @@ extern "C"
     }
 
     DWORD __stdcall XInput_XInputSetState(
-        DWORD user,
-        XINPUT_VIBRATION* vibration)
+        DWORD user, XINPUT_VIBRATION* vibration)
     {
         if (!InitRealXInput())
             return ERROR_DEVICE_NOT_CONNECTED;
@@ -310,7 +269,6 @@ BOOL APIENTRY DllMain(
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(module);
-
         InitRealXInput();
 
         HANDLE thread = CreateThread(

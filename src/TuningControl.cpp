@@ -17,7 +17,7 @@ namespace TuningControl
         constexpr int MAX_REFERENCE_HZ = 461;
         constexpr int DEFAULT_REFERENCE_HZ = 440;
 
-        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test5";
+        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test6";
 
         constexpr int KEY_DROP_DOWN = VK_OEM_COMMA;
         constexpr int KEY_DROP_UP   = VK_OEM_PERIOD;
@@ -140,7 +140,7 @@ namespace TuningControl
                 GetModuleHandleW(nullptr);
 
             const wchar_t* className =
-                L"RSSongRefreshTuningOSD";
+                L"RLModsTuningOSD";
 
             WNDCLASSW wc{};
             wc.lpfnWndProc = OverlayProc;

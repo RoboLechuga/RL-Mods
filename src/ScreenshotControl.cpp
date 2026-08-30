@@ -1,5 +1,6 @@
 #include <Windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -14,21 +15,35 @@ namespace ScreenshotControl
     {
         constexpr std::uintptr_t CURRENT_MENU_RELOCATED = 0x00F6062C;
         constexpr std::uintptr_t CURRENT_MENU_LEGACY = 0x0135F62C;
-        constexpr ULONGLONG SCREENSHOT_DELAY_MS = 8000;
-        constexpr int KEY_TOGGLE = VK_F9;
 
-        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test5";
+        constexpr int DEFAULT_DELAY_MS = 10000;
+        constexpr int MIN_DELAY_MS = 3000;
+        constexpr int MAX_DELAY_MS = 20000;
+        constexpr int DELAY_STEP_MS = 1000;
+
+        constexpr const wchar_t* INI_SECTION = L"Screenshot";
+        constexpr const wchar_t* INI_KEY_ENABLED = L"Enabled";
+        constexpr const wchar_t* INI_KEY_DELAY = L"DelayMs";
+        constexpr const wchar_t* INI_KEY_DEBUG = L"Debug";
+
+        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test6";
 
         bool g_enabled = true;
+        bool g_debug = false;
+        int g_delayMs = DEFAULT_DELAY_MS;
+
         bool g_captured = false;
         ULONGLONG g_captureAt = 0;
         std::string g_scoreMenu;
+
         std::string g_lastMenu;
-        std::string g_status = "Waiting for menu";
+        std::string g_status;
 
         HWND g_overlay = nullptr;
         HFONT g_font = nullptr;
         ULONGLONG g_hideAt = 0;
+
+        std::wstring g_iniPath;
 
         bool IsReadableAddress(const void* address)
         {
@@ -41,8 +56,10 @@ namespace ScreenshotControl
 
             if (mbi.State != MEM_COMMIT)
                 return false;
+
             if (mbi.Protect & PAGE_GUARD)
                 return false;
+
             if (mbi.Protect & PAGE_NOACCESS)
                 return false;
 
@@ -101,8 +118,8 @@ namespace ScreenshotControl
                 return {};
 
             constexpr size_t MAX_MENU_LENGTH = 128;
-
             size_t length = 0;
+
             while (length < MAX_MENU_LENGTH)
             {
                 const char* current = text + length;
@@ -116,16 +133,17 @@ namespace ScreenshotControl
                 if (c == '\0')
                     break;
 
-                // Menu identifiers are ordinary printable ASCII.
-                // Reject garbage from a bad pointer chain.
                 if (c < 32 || c > 126)
                     return {};
 
                 ++length;
             }
 
-            if (length == 0 || length == MAX_MENU_LENGTH)
+            if (length == 0 ||
+                length == MAX_MENU_LENGTH)
+            {
                 return {};
+            }
 
             return std::string(text, length);
         }
@@ -139,24 +157,22 @@ namespace ScreenshotControl
             const std::uintptr_t moduleBase =
                 reinterpret_cast<std::uintptr_t>(gameModule);
 
-            // Current Remastered/base-relative candidate.
-            std::string menu = ReadMenuString(
-                ResolveMenuFromBase(
-                    moduleBase + CURRENT_MENU_RELOCATED));
+            std::string menu =
+                ReadMenuString(
+                    ResolveMenuFromBase(
+                        moduleBase +
+                        CURRENT_MENU_RELOCATED));
 
             if (!menu.empty())
                 return menu;
 
-            // Legacy absolute candidate used by RSMods' alternate version entry.
-            menu = ReadMenuString(
-                ResolveMenuFromBase(CURRENT_MENU_LEGACY));
-
-            return menu;
+            return ReadMenuString(
+                ResolveMenuFromBase(
+                    CURRENT_MENU_LEGACY));
         }
 
         bool IsScoreMenu(const std::string& menu)
         {
-            // RSMods uses Contains(), not exact equality.
             return
                 menu.find("LearnASong_SongReview") != std::string::npos ||
                 menu.find("ScoreAttack_SongReview") != std::string::npos ||
@@ -185,22 +201,127 @@ namespace ScreenshotControl
             g_captured = false;
         }
 
+        void BuildIniPath()
+        {
+            wchar_t path[MAX_PATH] = {};
+
+            const DWORD length =
+                GetModuleFileNameW(
+                    nullptr,
+                    path,
+                    MAX_PATH);
+
+            if (length == 0 ||
+                length >= MAX_PATH)
+            {
+                g_iniPath = L"RLMods.ini";
+                return;
+            }
+
+            std::wstring fullPath(path);
+            const size_t slash =
+                fullPath.find_last_of(L"\\/");
+
+            if (slash == std::wstring::npos)
+            {
+                g_iniPath = L"RLMods.ini";
+                return;
+            }
+
+            g_iniPath =
+                fullPath.substr(0, slash + 1) +
+                L"RLMods.ini";
+        }
+
+        bool ReadIniBool(
+            const wchar_t* key,
+            bool defaultValue)
+        {
+            return
+                GetPrivateProfileIntW(
+                    INI_SECTION,
+                    key,
+                    defaultValue ? 1 : 0,
+                    g_iniPath.c_str()) != 0;
+        }
+
+        int ReadIniInt(
+            const wchar_t* key,
+            int defaultValue)
+        {
+            return static_cast<int>(
+                GetPrivateProfileIntW(
+                    INI_SECTION,
+                    key,
+                    defaultValue,
+                    g_iniPath.c_str()));
+        }
+
+        void WriteIniInt(
+            const wchar_t* key,
+            int value)
+        {
+            wchar_t buffer[32] = {};
+
+            swprintf_s(
+                buffer,
+                L"%d",
+                value);
+
+            WritePrivateProfileStringW(
+                INI_SECTION,
+                key,
+                buffer,
+                g_iniPath.c_str());
+        }
+
+        void SaveSettings()
+        {
+            WriteIniInt(
+                INI_KEY_ENABLED,
+                g_enabled ? 1 : 0);
+
+            WriteIniInt(
+                INI_KEY_DELAY,
+                g_delayMs);
+
+            WriteIniInt(
+                INI_KEY_DEBUG,
+                g_debug ? 1 : 0);
+        }
+
         std::string OverlayText()
         {
             char buffer[512] = {};
 
-            const char* menuText =
-                g_lastMenu.empty()
-                ? "<unresolved>"
-                : g_lastMenu.c_str();
+            if (g_debug)
+            {
+                const char* menuText =
+                    g_lastMenu.empty()
+                    ? "<unresolved>"
+                    : g_lastMenu.c_str();
 
-            sprintf_s(
-                buffer,
-                "Auto Screenshot: %s\nMenu: %s\nStatus: %s\n%s",
-                g_enabled ? "ON" : "OFF",
-                menuText,
-                g_status.c_str(),
-                VERSION_TEXT);
+                sprintf_s(
+                    buffer,
+                    "Auto Screenshot: %s    Delay: %.1fs\n"
+                    "Menu: %s\n"
+                    "Status: %s\n"
+                    "%s",
+                    g_enabled ? "ON" : "OFF",
+                    g_delayMs / 1000.0,
+                    menuText,
+                    g_status.c_str(),
+                    VERSION_TEXT);
+            }
+            else
+            {
+                sprintf_s(
+                    buffer,
+                    "Auto Screenshot: %s    Delay: %.1fs\n%s",
+                    g_enabled ? "ON" : "OFF",
+                    g_delayMs / 1000.0,
+                    VERSION_TEXT);
+            }
 
             return buffer;
         }
@@ -226,6 +347,7 @@ namespace ScreenshotControl
 
                 HBRUSH background =
                     CreateSolidBrush(RGB(20, 20, 20));
+
                 FillRect(dc, &rect, background);
                 DeleteObject(background);
 
@@ -233,6 +355,7 @@ namespace ScreenshotControl
                 SetTextColor(dc, RGB(245, 245, 245));
 
                 HFONT previousFont = nullptr;
+
                 if (g_font)
                 {
                     previousFont =
@@ -270,34 +393,46 @@ namespace ScreenshotControl
             }
         }
 
-        bool CreateOverlay()
+        bool EnsureOverlay()
         {
-            HINSTANCE instance = GetModuleHandleW(nullptr);
-            const wchar_t* className = L"RLModsScreenshotOSD";
+            if (g_overlay)
+                return true;
+
+            HINSTANCE instance =
+                GetModuleHandleW(nullptr);
+
+            const wchar_t* className =
+                L"RLModsScreenshotOSD";
 
             WNDCLASSW wc{};
             wc.lpfnWndProc = OverlayProc;
             wc.hInstance = instance;
             wc.lpszClassName = className;
-            wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+            wc.hCursor =
+                LoadCursor(nullptr, IDC_ARROW);
 
             RegisterClassW(&wc);
 
-            g_font = CreateFontW(
-                -20,
-                0,
-                0,
-                0,
-                FW_SEMIBOLD,
-                FALSE,
-                FALSE,
-                FALSE,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                DEFAULT_PITCH | FF_DONTCARE,
-                L"Segoe UI");
+            g_font =
+                CreateFontW(
+                    -20,
+                    0,
+                    0,
+                    0,
+                    FW_SEMIBOLD,
+                    FALSE,
+                    FALSE,
+                    FALSE,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    DEFAULT_PITCH |
+                    FF_DONTCARE,
+                    L"Segoe UI");
+
+            const int height =
+                g_debug ? 118 : 72;
 
             g_overlay =
                 CreateWindowExW(
@@ -312,7 +447,7 @@ namespace ScreenshotControl
                     40,
                     145,
                     650,
-                    118,
+                    height,
                     nullptr,
                     nullptr,
                     instance,
@@ -330,12 +465,19 @@ namespace ScreenshotControl
             return true;
         }
 
-        void ShowOverlay(ULONGLONG durationMs = 3000)
+        void ShowOverlay(
+            ULONGLONG durationMs = 2500)
         {
-            if (!g_overlay)
+            if (!EnsureOverlay())
                 return;
 
-            InvalidateRect(g_overlay, nullptr, TRUE);
+            const int height =
+                g_debug ? 118 : 72;
+
+            InvalidateRect(
+                g_overlay,
+                nullptr,
+                TRUE);
 
             SetWindowPos(
                 g_overlay,
@@ -343,40 +485,148 @@ namespace ScreenshotControl
                 40,
                 145,
                 650,
-                118,
+                height,
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
 
-            g_hideAt = GetTickCount64() + durationMs;
+            g_hideAt =
+                GetTickCount64() +
+                durationMs;
+        }
+
+        void HideOverlay()
+        {
+            if (!g_overlay)
+                return;
+
+            ShowWindow(
+                g_overlay,
+                SW_HIDE);
+
+            g_hideAt = 0;
         }
 
         bool KeyPressed(int virtualKey)
         {
-            return (GetAsyncKeyState(virtualKey) & 1) != 0;
+            return
+                (GetAsyncKeyState(
+                    virtualKey) & 1) != 0;
+        }
+
+        bool KeyDown(int virtualKey)
+        {
+            return
+                (GetAsyncKeyState(
+                    virtualKey) &
+                    0x8000) != 0;
+        }
+
+        void ChangeDelay(int deltaMs)
+        {
+            g_delayMs =
+                std::clamp(
+                    g_delayMs + deltaMs,
+                    MIN_DELAY_MS,
+                    MAX_DELAY_MS);
+
+            SaveSettings();
+
+            g_status = "Delay changed";
+            ShowOverlay();
+        }
+
+        void ToggleDebug()
+        {
+            g_debug = !g_debug;
+            SaveSettings();
+
+            g_status =
+                g_debug
+                ? "Debug enabled"
+                : "Debug disabled";
+
+            ShowOverlay();
         }
     }
 
     void Initialize()
     {
-        g_enabled = true;
+        BuildIniPath();
+
+        g_enabled =
+            ReadIniBool(
+                INI_KEY_ENABLED,
+                true);
+
+        g_delayMs =
+            std::clamp(
+                ReadIniInt(
+                    INI_KEY_DELAY,
+                    DEFAULT_DELAY_MS),
+                MIN_DELAY_MS,
+                MAX_DELAY_MS);
+
+        g_debug =
+            ReadIniBool(
+                INI_KEY_DEBUG,
+                false);
+
         ResetCapture();
 
-        g_lastMenu = CurrentMenu();
-        g_status =
-            g_lastMenu.empty()
-            ? "Menu pointer unresolved"
-            : "Menu pointer resolved";
+        if (g_debug)
+        {
+            g_lastMenu = CurrentMenu();
 
-        CreateOverlay();
-        ShowOverlay(4000);
+            g_status =
+                g_lastMenu.empty()
+                ? "Menu pointer unresolved"
+                : "Menu pointer resolved";
+
+            ShowOverlay(3500);
+        }
     }
 
     void Poll()
     {
-        if (KeyPressed(KEY_TOGGLE))
+        const bool ctrl =
+            KeyDown(VK_CONTROL);
+
+        const bool shift =
+            KeyDown(VK_SHIFT);
+
+        const bool f9Pressed =
+            KeyPressed(VK_F9);
+
+        const bool f10Pressed =
+            KeyPressed(VK_F10);
+
+        if (ctrl &&
+            shift &&
+            f9Pressed)
         {
-            g_enabled = !g_enabled;
+            ToggleDebug();
+        }
+        else if (ctrl &&
+                 f9Pressed)
+        {
+            ChangeDelay(
+                -DELAY_STEP_MS);
+        }
+        else if (ctrl &&
+                 f10Pressed)
+        {
+            ChangeDelay(
+                DELAY_STEP_MS);
+        }
+        else if (!ctrl &&
+                 !shift &&
+                 f9Pressed)
+        {
+            g_enabled =
+                !g_enabled;
+
             ResetCapture();
+            SaveSettings();
 
             g_status =
                 g_enabled
@@ -386,29 +636,47 @@ namespace ScreenshotControl
             ShowOverlay();
         }
 
-        const std::string menu = CurrentMenu();
+        const std::string menu =
+            CurrentMenu();
 
-        if (menu != g_lastMenu)
+        if (g_debug &&
+            menu != g_lastMenu)
         {
             g_lastMenu = menu;
 
             if (g_lastMenu.empty())
-                g_status = "Menu pointer unresolved";
-            else if (IsScoreMenu(g_lastMenu))
-                g_status = "Score screen detected - capture in 8s";
-            else
-                g_status = "Menu detected";
+            {
+                g_status =
+                    "Menu pointer unresolved";
+            }
+            else if (
+                IsScoreMenu(g_lastMenu))
+            {
+                char status[96] = {};
 
-            ShowOverlay(4000);
+                sprintf_s(
+                    status,
+                    "Score screen detected - capture in %.1fs",
+                    g_delayMs / 1000.0);
+
+                g_status = status;
+            }
+            else
+            {
+                g_status =
+                    "Menu detected";
+            }
+
+            ShowOverlay(3500);
         }
 
         if (g_overlay &&
             IsWindowVisible(g_overlay) &&
             g_hideAt != 0 &&
-            GetTickCount64() >= g_hideAt)
+            GetTickCount64() >=
+                g_hideAt)
         {
-            ShowWindow(g_overlay, SW_HIDE);
-            g_hideAt = 0;
+            HideOverlay();
         }
 
         if (!g_enabled)
@@ -422,16 +690,32 @@ namespace ScreenshotControl
             return;
         }
 
-        const ULONGLONG now = GetTickCount64();
+        const ULONGLONG now =
+            GetTickCount64();
 
         if (menu != g_scoreMenu)
         {
             g_scoreMenu = menu;
-            g_captureAt = now + SCREENSHOT_DELAY_MS;
+            g_captureAt =
+                now +
+                static_cast<ULONGLONG>(
+                    g_delayMs);
+
             g_captured = false;
 
-            g_status = "Score screen detected - capture in 8s";
-            ShowOverlay(4000);
+            if (g_debug)
+            {
+                char status[96] = {};
+
+                sprintf_s(
+                    status,
+                    "Score screen detected - capture in %.1fs",
+                    g_delayMs / 1000.0);
+
+                g_status = status;
+                ShowOverlay(3500);
+            }
+
             return;
         }
 
@@ -442,8 +726,13 @@ namespace ScreenshotControl
             TakeScreenshot();
             g_captured = true;
 
-            g_status = "Screenshot sent";
-            ShowOverlay(4000);
+            if (g_debug)
+            {
+                g_status =
+                    "Screenshot sent";
+
+                ShowOverlay(3500);
+            }
         }
     }
 
