@@ -100,7 +100,7 @@ namespace TuningControl
 
             sprintf_s(
                 buffer,
-                "Drop: %s    Ref: A%d",
+                "Tuning: %s    Ref: A%d",
                 DropName(g_dropSemitones),
                 g_referenceHz);
 
