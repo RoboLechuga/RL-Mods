@@ -17,7 +17,7 @@ namespace TuningControl
         constexpr int MAX_REFERENCE_HZ = 461;
         constexpr int DEFAULT_REFERENCE_HZ = 440;
 
-        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test4";
+        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test5";
 
         constexpr int KEY_DROP_DOWN = VK_OEM_COMMA;
         constexpr int KEY_DROP_UP   = VK_OEM_PERIOD;
@@ -52,10 +52,10 @@ namespace TuningControl
 
             sprintf_s(
                 buffer,
-                "%s | Drop: %s    Ref: A%d",
-                VERSION_TEXT,
+                "Drop: %s    Ref: A%d\n%s",
                 DropName(g_dropSemitones),
-                g_referenceHz);
+                g_referenceHz,
+                VERSION_TEXT);
 
             return buffer;
         }
@@ -113,7 +113,6 @@ namespace TuningControl
                     &rect,
                     DT_CENTER |
                     DT_VCENTER |
-                    DT_SINGLELINE |
                     DT_NOPREFIX);
 
                 if (previousFont)
@@ -152,7 +151,7 @@ namespace TuningControl
             RegisterClassW(&wc);
 
             g_font = CreateFontW(
-                -26,
+                -24,
                 0,
                 0,
                 0,
@@ -179,8 +178,8 @@ namespace TuningControl
                     WS_POPUP,
                     40,
                     40,
-                    520,
-                    68,
+                    390,
+                    92,
                     nullptr,
                     nullptr,
                     instance,
@@ -210,8 +209,8 @@ namespace TuningControl
                 HWND_TOPMOST,
                 40,
                 40,
-                520,
-                68,
+                390,
+                92,
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
 

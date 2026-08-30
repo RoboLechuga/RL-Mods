@@ -12,16 +12,19 @@ namespace ScreenshotControl
 {
     namespace
     {
-        constexpr std::uintptr_t CURRENT_MENU_BASE = 0x00F6062C;
+        constexpr std::uintptr_t CURRENT_MENU_RELOCATED = 0x00F6062C;
+        constexpr std::uintptr_t CURRENT_MENU_LEGACY = 0x0135F62C;
         constexpr ULONGLONG SCREENSHOT_DELAY_MS = 8000;
         constexpr int KEY_TOGGLE = VK_F9;
 
-        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test4";
+        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test5";
 
         bool g_enabled = true;
         bool g_captured = false;
         ULONGLONG g_captureAt = 0;
         std::string g_scoreMenu;
+        std::string g_lastMenu;
+        std::string g_status = "Waiting for menu";
 
         HWND g_overlay = nullptr;
         HFONT g_font = nullptr;
@@ -73,16 +76,8 @@ namespace ScreenshotControl
             return next + offset;
         }
 
-        std::uintptr_t ResolveCurrentMenu()
+        std::uintptr_t ResolveMenuFromBase(std::uintptr_t address)
         {
-            HMODULE gameModule = GetModuleHandleW(nullptr);
-            if (!gameModule)
-                return 0;
-
-            std::uintptr_t address =
-                reinterpret_cast<std::uintptr_t>(gameModule) +
-                CURRENT_MENU_BASE;
-
             address = DereferenceAndAdd(address, 0x28);
             if (!address)
                 return 0;
@@ -91,13 +86,11 @@ namespace ScreenshotControl
             if (!address)
                 return 0;
 
-            address = DereferenceAndAdd(address, 0x0);
-            return address;
+            return DereferenceAndAdd(address, 0x0);
         }
 
-        std::string CurrentMenu()
+        std::string ReadMenuString(std::uintptr_t address)
         {
-            const std::uintptr_t address = ResolveCurrentMenu();
             if (!address)
                 return {};
 
@@ -117,8 +110,16 @@ namespace ScreenshotControl
                 if (!IsReadableAddress(current))
                     return {};
 
-                if (*current == '\0')
+                const unsigned char c =
+                    static_cast<unsigned char>(*current);
+
+                if (c == '\0')
                     break;
+
+                // Menu identifiers are ordinary printable ASCII.
+                // Reject garbage from a bad pointer chain.
+                if (c < 32 || c > 126)
+                    return {};
 
                 ++length;
             }
@@ -129,13 +130,38 @@ namespace ScreenshotControl
             return std::string(text, length);
         }
 
+        std::string CurrentMenu()
+        {
+            HMODULE gameModule = GetModuleHandleW(nullptr);
+            if (!gameModule)
+                return {};
+
+            const std::uintptr_t moduleBase =
+                reinterpret_cast<std::uintptr_t>(gameModule);
+
+            // Current Remastered/base-relative candidate.
+            std::string menu = ReadMenuString(
+                ResolveMenuFromBase(
+                    moduleBase + CURRENT_MENU_RELOCATED));
+
+            if (!menu.empty())
+                return menu;
+
+            // Legacy absolute candidate used by RSMods' alternate version entry.
+            menu = ReadMenuString(
+                ResolveMenuFromBase(CURRENT_MENU_LEGACY));
+
+            return menu;
+        }
+
         bool IsScoreMenu(const std::string& menu)
         {
+            // RSMods uses Contains(), not exact equality.
             return
-                menu == "LearnASong_SongReview" ||
-                menu == "ScoreAttack_SongReview" ||
-                menu == "Duet_SongReview" ||
-                menu == "H2H_SongReview";
+                menu.find("LearnASong_SongReview") != std::string::npos ||
+                menu.find("ScoreAttack_SongReview") != std::string::npos ||
+                menu.find("Duet_SongReview") != std::string::npos ||
+                menu.find("H2H_SongReview") != std::string::npos;
         }
 
         void TakeScreenshot()
@@ -159,17 +185,24 @@ namespace ScreenshotControl
             g_captured = false;
         }
 
-        const char* OverlayText()
+        std::string OverlayText()
         {
-            static char text[128] = {};
+            char buffer[512] = {};
+
+            const char* menuText =
+                g_lastMenu.empty()
+                ? "<unresolved>"
+                : g_lastMenu.c_str();
 
             sprintf_s(
-                text,
-                "%s | Auto Screenshot: %s",
-                VERSION_TEXT,
-                g_enabled ? "ON" : "OFF");
+                buffer,
+                "Auto Screenshot: %s\nMenu: %s\nStatus: %s\n%s",
+                g_enabled ? "ON" : "OFF",
+                menuText,
+                g_status.c_str(),
+                VERSION_TEXT);
 
-            return text;
+            return buffer;
         }
 
         LRESULT CALLBACK OverlayProc(
@@ -207,14 +240,15 @@ namespace ScreenshotControl
                             SelectObject(dc, g_font));
                 }
 
+                std::string text = OverlayText();
+
                 DrawTextA(
                     dc,
-                    OverlayText(),
+                    text.c_str(),
                     -1,
                     &rect,
                     DT_CENTER |
                     DT_VCENTER |
-                    DT_SINGLELINE |
                     DT_NOPREFIX);
 
                 if (previousFont)
@@ -250,7 +284,7 @@ namespace ScreenshotControl
             RegisterClassW(&wc);
 
             g_font = CreateFontW(
-                -24,
+                -20,
                 0,
                 0,
                 0,
@@ -276,9 +310,9 @@ namespace ScreenshotControl
                     L"",
                     WS_POPUP,
                     40,
+                    145,
+                    650,
                     118,
-                    430,
-                    58,
                     nullptr,
                     nullptr,
                     instance,
@@ -296,7 +330,7 @@ namespace ScreenshotControl
             return true;
         }
 
-        void ShowOverlay()
+        void ShowOverlay(ULONGLONG durationMs = 3000)
         {
             if (!g_overlay)
                 return;
@@ -307,13 +341,13 @@ namespace ScreenshotControl
                 g_overlay,
                 HWND_TOPMOST,
                 40,
+                145,
+                650,
                 118,
-                430,
-                58,
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
 
-            g_hideAt = GetTickCount64() + 1800;
+            g_hideAt = GetTickCount64() + durationMs;
         }
 
         bool KeyPressed(int virtualKey)
@@ -326,8 +360,15 @@ namespace ScreenshotControl
     {
         g_enabled = true;
         ResetCapture();
+
+        g_lastMenu = CurrentMenu();
+        g_status =
+            g_lastMenu.empty()
+            ? "Menu pointer unresolved"
+            : "Menu pointer resolved";
+
         CreateOverlay();
-        ShowOverlay();
+        ShowOverlay(4000);
     }
 
     void Poll()
@@ -336,7 +377,29 @@ namespace ScreenshotControl
         {
             g_enabled = !g_enabled;
             ResetCapture();
+
+            g_status =
+                g_enabled
+                ? "Enabled"
+                : "Disabled";
+
             ShowOverlay();
+        }
+
+        const std::string menu = CurrentMenu();
+
+        if (menu != g_lastMenu)
+        {
+            g_lastMenu = menu;
+
+            if (g_lastMenu.empty())
+                g_status = "Menu pointer unresolved";
+            else if (IsScoreMenu(g_lastMenu))
+                g_status = "Score screen detected - capture in 8s";
+            else
+                g_status = "Menu detected";
+
+            ShowOverlay(4000);
         }
 
         if (g_overlay &&
@@ -350,8 +413,6 @@ namespace ScreenshotControl
 
         if (!g_enabled)
             return;
-
-        const std::string menu = CurrentMenu();
 
         if (!IsScoreMenu(menu))
         {
@@ -368,6 +429,9 @@ namespace ScreenshotControl
             g_scoreMenu = menu;
             g_captureAt = now + SCREENSHOT_DELAY_MS;
             g_captured = false;
+
+            g_status = "Score screen detected - capture in 8s";
+            ShowOverlay(4000);
             return;
         }
 
@@ -377,6 +441,9 @@ namespace ScreenshotControl
         {
             TakeScreenshot();
             g_captured = true;
+
+            g_status = "Screenshot sent";
+            ShowOverlay(4000);
         }
     }
 
