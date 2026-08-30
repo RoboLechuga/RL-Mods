@@ -26,7 +26,7 @@ namespace ScreenshotControl
         constexpr const wchar_t* INI_KEY_DELAY = L"DelayMs";
         constexpr const wchar_t* INI_KEY_DEBUG = L"Debug";
 
-        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test6";
+        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test7";
 
         bool g_enabled = true;
         bool g_debug = false;
@@ -38,6 +38,7 @@ namespace ScreenshotControl
 
         std::string g_lastMenu;
         std::string g_status;
+        bool g_showHelp = false;
 
         HWND g_overlay = nullptr;
         HFONT g_font = nullptr;
@@ -292,9 +293,28 @@ namespace ScreenshotControl
 
         std::string OverlayText()
         {
-            char buffer[512] = {};
+            char buffer[1024] = {};
 
-            if (g_debug)
+            if (g_showHelp)
+            {
+                sprintf_s(
+                    buffer,
+                    "RLMods Hotkeys\n"
+                    ", / .     Drop tuning down / up\n"
+                    "; / '     Reference pitch down / up\n"
+                    "\\\\        Reset reference to A440\n"
+                    "5         Auto Screenshot ON/OFF\n"
+                    "6 / 7     Screenshot delay -1s / +1s\n"
+                    "8         Screenshot debug ON/OFF\n"
+                    "F8        Refresh song enumeration\n"
+                    "F10       Show this hotkey cheat sheet\n"
+                    "F12       Steam screenshot (native)\n"
+                    "\n"
+                    "\"If it sounds bad, that's probably still you.\"\n"
+                    "%s",
+                    VERSION_TEXT);
+            }
+            else if (g_debug)
             {
                 const char* menuText =
                     g_lastMenu.empty()
@@ -432,7 +452,9 @@ namespace ScreenshotControl
                     L"Segoe UI");
 
             const int height =
-                g_debug ? 118 : 72;
+                g_showHelp
+                ? 290
+                : (g_debug ? 118 : 72);
 
             g_overlay =
                 CreateWindowExW(
@@ -446,7 +468,7 @@ namespace ScreenshotControl
                     WS_POPUP,
                     40,
                     145,
-                    650,
+                    720,
                     height,
                     nullptr,
                     nullptr,
@@ -472,7 +494,9 @@ namespace ScreenshotControl
                 return;
 
             const int height =
-                g_debug ? 118 : 72;
+                g_showHelp
+                ? 290
+                : (g_debug ? 118 : 72);
 
             InvalidateRect(
                 g_overlay,
@@ -484,7 +508,7 @@ namespace ScreenshotControl
                 HWND_TOPMOST,
                 40,
                 145,
-                650,
+                720,
                 height,
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
@@ -496,6 +520,7 @@ namespace ScreenshotControl
 
         void HideOverlay()
         {
+            g_showHelp = false;
             if (!g_overlay)
                 return;
 
@@ -513,16 +538,15 @@ namespace ScreenshotControl
                     virtualKey) & 1) != 0;
         }
 
-        bool KeyDown(int virtualKey)
+        void ShowHotkeyHelp()
         {
-            return
-                (GetAsyncKeyState(
-                    virtualKey) &
-                    0x8000) != 0;
+            g_showHelp = true;
+            ShowOverlay(7000);
         }
 
         void ChangeDelay(int deltaMs)
         {
+            g_showHelp = false;
             g_delayMs =
                 std::clamp(
                     g_delayMs + deltaMs,
@@ -537,6 +561,7 @@ namespace ScreenshotControl
 
         void ToggleDebug()
         {
+            g_showHelp = false;
             g_debug = !g_debug;
             SaveSettings();
 
@@ -588,40 +613,10 @@ namespace ScreenshotControl
 
     void Poll()
     {
-        const bool ctrl =
-            KeyDown(VK_CONTROL);
-
-        const bool shift =
-            KeyDown(VK_SHIFT);
-
-        const bool f9Pressed =
-            KeyPressed(VK_F9);
-
-        const bool f10Pressed =
-            KeyPressed(VK_F10);
-
-        if (ctrl &&
-            shift &&
-            f9Pressed)
+        if (KeyPressed('5'))
         {
-            ToggleDebug();
-        }
-        else if (ctrl &&
-                 f9Pressed)
-        {
-            ChangeDelay(
-                -DELAY_STEP_MS);
-        }
-        else if (ctrl &&
-                 f10Pressed)
-        {
-            ChangeDelay(
-                DELAY_STEP_MS);
-        }
-        else if (!ctrl &&
-                 !shift &&
-                 f9Pressed)
-        {
+            g_showHelp = false;
+
             g_enabled =
                 !g_enabled;
 
@@ -634,6 +629,28 @@ namespace ScreenshotControl
                 : "Disabled";
 
             ShowOverlay();
+        }
+
+        if (KeyPressed('6'))
+        {
+            ChangeDelay(
+                -DELAY_STEP_MS);
+        }
+
+        if (KeyPressed('7'))
+        {
+            ChangeDelay(
+                DELAY_STEP_MS);
+        }
+
+        if (KeyPressed('8'))
+        {
+            ToggleDebug();
+        }
+
+        if (KeyPressed(VK_F10))
+        {
+            ShowHotkeyHelp();
         }
 
         const std::string menu =
