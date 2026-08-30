@@ -7,10 +7,10 @@ configuration: Release
 platform: Win32
 
 build:
-  project: src/RSMods-Min.vcxproj
+  project: src/RL-Mods.vcxproj
   parallel: false
   verbosity: minimal
 
 artifacts:
   - path: 'src\Release\xinput1_3.dll'
-    name: RSMods-Min
+    name: RL-Mods
