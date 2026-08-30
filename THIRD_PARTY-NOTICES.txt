@@ -4,7 +4,7 @@ THIRD-PARTY NOTICES
 Stephan M. Bernsee - smbPitchShift
 ----------------------------------
 
-RSMods-Min's RealtimePitchShifter uses a refactored, per-instance adaptation
+RL-Mods' RealtimePitchShifter uses a refactored, per-instance adaptation
 of Stephan M. Bernsee's classic smbPitchShift STFT pitch-shifting algorithm.
 
 Original source and article:
