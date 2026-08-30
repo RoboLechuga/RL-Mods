@@ -26,7 +26,7 @@ namespace ScreenshotControl
         constexpr const wchar_t* INI_KEY_DELAY = L"DelayMs";
         constexpr const wchar_t* INI_KEY_DEBUG = L"Debug";
 
-        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test7";
+        constexpr const char* VERSION_TEXT = "RL-Mods 1.2";
 
         bool g_enabled = true;
         bool g_debug = false;
@@ -299,15 +299,14 @@ namespace ScreenshotControl
             {
                 sprintf_s(
                     buffer,
-                    "RLMods Hotkeys\n"
+                    "RL-Mods Hotkeys\n"
                     ", / .     Drop tuning down / up\n"
                     "; / '     Reference pitch down / up\n"
-                    "\\\\        Reset reference to A440\n"
-                    "5         Auto Screenshot ON/OFF\n"
-                    "6 / 7     Screenshot delay -1s / +1s\n"
-                    "8         Screenshot debug ON/OFF\n"
+                    "\\        Reset reference to A440\n"
+                    "F4        Show this hotkey cheat sheet\n"
+                    "F5        Auto Screenshot ON/OFF\n"
+                    "F6 / F7   Screenshot delay -1s / +1s\n"
                     "F8        Refresh song enumeration\n"
-                    "F10       Show this hotkey cheat sheet\n"
                     "F12       Steam screenshot (native)\n"
                     "\n"
                     "\"If it sounds bad, that's probably still you.\"\n"
@@ -325,22 +324,19 @@ namespace ScreenshotControl
                     buffer,
                     "Auto Screenshot: %s    Delay: %.1fs\n"
                     "Menu: %s\n"
-                    "Status: %s\n"
-                    "%s",
+                    "Status: %s",
                     g_enabled ? "ON" : "OFF",
                     g_delayMs / 1000.0,
                     menuText,
-                    g_status.c_str(),
-                    VERSION_TEXT);
+                    g_status.c_str());
             }
             else
             {
                 sprintf_s(
                     buffer,
-                    "Auto Screenshot: %s    Delay: %.1fs\n%s",
+                    "Auto Screenshot: %s    Delay: %.1fs",
                     g_enabled ? "ON" : "OFF",
-                    g_delayMs / 1000.0,
-                    VERSION_TEXT);
+                    g_delayMs / 1000.0);
             }
 
             return buffer;
@@ -383,7 +379,7 @@ namespace ScreenshotControl
                             SelectObject(dc, g_font));
                 }
 
-                std::string text = OverlayText();
+                const std::string text = OverlayText();
 
                 DrawTextA(
                     dc,
@@ -453,7 +449,7 @@ namespace ScreenshotControl
 
             const int height =
                 g_showHelp
-                ? 290
+                ? 330
                 : (g_debug ? 118 : 72);
 
             g_overlay =
@@ -467,7 +463,7 @@ namespace ScreenshotControl
                     L"",
                     WS_POPUP,
                     40,
-                    145,
+                    118,
                     720,
                     height,
                     nullptr,
@@ -495,7 +491,7 @@ namespace ScreenshotControl
 
             const int height =
                 g_showHelp
-                ? 290
+                ? 330
                 : (g_debug ? 118 : 72);
 
             InvalidateRect(
@@ -507,7 +503,7 @@ namespace ScreenshotControl
                 g_overlay,
                 HWND_TOPMOST,
                 40,
-                145,
+                118,
                 720,
                 height,
                 SWP_NOACTIVATE |
@@ -520,7 +516,6 @@ namespace ScreenshotControl
 
         void HideOverlay()
         {
-            g_showHelp = false;
             if (!g_overlay)
                 return;
 
@@ -529,6 +524,7 @@ namespace ScreenshotControl
                 SW_HIDE);
 
             g_hideAt = 0;
+            g_showHelp = false;
         }
 
         bool KeyPressed(int virtualKey)
@@ -547,6 +543,7 @@ namespace ScreenshotControl
         void ChangeDelay(int deltaMs)
         {
             g_showHelp = false;
+
             g_delayMs =
                 std::clamp(
                     g_delayMs + deltaMs,
@@ -556,20 +553,6 @@ namespace ScreenshotControl
             SaveSettings();
 
             g_status = "Delay changed";
-            ShowOverlay();
-        }
-
-        void ToggleDebug()
-        {
-            g_showHelp = false;
-            g_debug = !g_debug;
-            SaveSettings();
-
-            g_status =
-                g_debug
-                ? "Debug enabled"
-                : "Debug disabled";
-
             ShowOverlay();
         }
     }
@@ -613,7 +596,12 @@ namespace ScreenshotControl
 
     void Poll()
     {
-        if (KeyPressed('5'))
+        if (KeyPressed(VK_F4))
+        {
+            ShowHotkeyHelp();
+        }
+
+        if (KeyPressed(VK_F5))
         {
             g_showHelp = false;
 
@@ -631,26 +619,16 @@ namespace ScreenshotControl
             ShowOverlay();
         }
 
-        if (KeyPressed('6'))
+        if (KeyPressed(VK_F6))
         {
             ChangeDelay(
                 -DELAY_STEP_MS);
         }
 
-        if (KeyPressed('7'))
+        if (KeyPressed(VK_F7))
         {
             ChangeDelay(
                 DELAY_STEP_MS);
-        }
-
-        if (KeyPressed('8'))
-        {
-            ToggleDebug();
-        }
-
-        if (KeyPressed(VK_F10))
-        {
-            ShowHotkeyHelp();
         }
 
         const std::string menu =

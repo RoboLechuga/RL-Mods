@@ -17,8 +17,6 @@ namespace TuningControl
         constexpr int MAX_REFERENCE_HZ = 461;
         constexpr int DEFAULT_REFERENCE_HZ = 440;
 
-        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test7";
-
         constexpr int KEY_DROP_DOWN = VK_OEM_COMMA;
         constexpr int KEY_DROP_UP   = VK_OEM_PERIOD;
         constexpr int KEY_REF_DOWN  = VK_OEM_1;
@@ -48,14 +46,13 @@ namespace TuningControl
 
         std::string CurrentText()
         {
-            char buffer[160] = {};
+            char buffer[96] = {};
 
             sprintf_s(
                 buffer,
-                "Drop: %s    Ref: A%d\n%s",
+                "Drop: %s    Ref: A%d",
                 DropName(g_dropSemitones),
-                g_referenceHz,
-                VERSION_TEXT);
+                g_referenceHz);
 
             return buffer;
         }
@@ -104,7 +101,7 @@ namespace TuningControl
                             SelectObject(dc, g_font));
                 }
 
-                std::string text = CurrentText();
+                const std::string text = CurrentText();
 
                 DrawTextA(
                     dc,
@@ -113,6 +110,7 @@ namespace TuningControl
                     &rect,
                     DT_CENTER |
                     DT_VCENTER |
+                    DT_SINGLELINE |
                     DT_NOPREFIX);
 
                 if (previousFont)
@@ -151,7 +149,7 @@ namespace TuningControl
             RegisterClassW(&wc);
 
             g_font = CreateFontW(
-                -24,
+                -26,
                 0,
                 0,
                 0,
@@ -178,8 +176,8 @@ namespace TuningControl
                     WS_POPUP,
                     40,
                     40,
-                    390,
-                    92,
+                    360,
+                    68,
                     nullptr,
                     nullptr,
                     instance,
@@ -209,8 +207,8 @@ namespace TuningControl
                 HWND_TOPMOST,
                 40,
                 40,
-                390,
-                92,
+                360,
+                68,
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
 
