@@ -2,8 +2,21 @@
 
 namespace AsioPassthrough
 {
+    enum class Status
+    {
+        NotInstalled,
+        WaitingForBuffers,
+        NoChannelsBound,
+        UnsupportedFormat,
+        DuplicateChannel,
+        Ready
+    };
+
     bool Install();
     bool IsInstalled();
+
+    Status GetStatus();
+    const char* GetStatusText();
 
     // Safe to call from the worker thread while audio is running.
     // semitones: 0 = E, -1 = Eb, -2 = D, etc.

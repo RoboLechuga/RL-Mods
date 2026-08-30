@@ -26,9 +26,44 @@ namespace TuningControl
         int g_dropSemitones = 0;
         int g_referenceHz = DEFAULT_REFERENCE_HZ;
 
+        AsioPassthrough::Status g_lastAsioStatus =
+            AsioPassthrough::Status::NotInstalled;
+
         HWND g_overlay = nullptr;
         HFONT g_font = nullptr;
         ULONGLONG g_hideAt = 0;
+
+        bool IsRocksmithForeground()
+        {
+            HWND foreground =
+                GetForegroundWindow();
+
+            if (!foreground)
+                return false;
+
+            DWORD processId = 0;
+
+            GetWindowThreadProcessId(
+                foreground,
+                &processId);
+
+            return
+                processId ==
+                GetCurrentProcessId();
+        }
+
+        bool KeyPressed(int virtualKey)
+        {
+            // Consume the latch whether focused or not.
+            const SHORT state =
+                GetAsyncKeyState(
+                    virtualKey);
+
+            if ((state & 1) == 0)
+                return false;
+
+            return IsRocksmithForeground();
+        }
 
         const char* DropName(int semitones)
         {
@@ -39,13 +74,28 @@ namespace TuningControl
             };
 
             int index = -semitones;
-            if (index < 0) index = 0;
-            if (index > 12) index = 12;
+
+            if (index < 0)
+                index = 0;
+
+            if (index > 12)
+                index = 12;
+
             return names[index];
         }
 
         std::string CurrentText()
         {
+            const auto asioStatus =
+                AsioPassthrough::GetStatus();
+
+            if (asioStatus !=
+                    AsioPassthrough::Status::Ready)
+            {
+                return
+                    AsioPassthrough::GetStatusText();
+            }
+
             char buffer[96] = {};
 
             sprintf_s(
@@ -78,30 +128,49 @@ namespace TuningControl
             case WM_PAINT:
             {
                 PAINTSTRUCT ps{};
-                HDC dc = BeginPaint(hwnd, &ps);
+                HDC dc =
+                    BeginPaint(
+                        hwnd,
+                        &ps);
 
                 RECT rect{};
-                GetClientRect(hwnd, &rect);
+                GetClientRect(
+                    hwnd,
+                    &rect);
 
                 HBRUSH background =
-                    CreateSolidBrush(RGB(20, 20, 20));
+                    CreateSolidBrush(
+                        RGB(20, 20, 20));
 
-                FillRect(dc, &rect, background);
+                FillRect(
+                    dc,
+                    &rect,
+                    background);
+
                 DeleteObject(background);
 
-                SetBkMode(dc, TRANSPARENT);
-                SetTextColor(dc, RGB(245, 245, 245));
+                SetBkMode(
+                    dc,
+                    TRANSPARENT);
 
-                HFONT previousFont = nullptr;
+                SetTextColor(
+                    dc,
+                    RGB(245, 245, 245));
+
+                HFONT previousFont =
+                    nullptr;
 
                 if (g_font)
                 {
                     previousFont =
                         reinterpret_cast<HFONT>(
-                            SelectObject(dc, g_font));
+                            SelectObject(
+                                dc,
+                                g_font));
                 }
 
-                const std::string text = CurrentText();
+                const std::string text =
+                    CurrentText();
 
                 DrawTextA(
                     dc,
@@ -114,9 +183,16 @@ namespace TuningControl
                     DT_NOPREFIX);
 
                 if (previousFont)
-                    SelectObject(dc, previousFont);
+                {
+                    SelectObject(
+                        dc,
+                        previousFont);
+                }
 
-                EndPaint(hwnd, &ps);
+                EndPaint(
+                    hwnd,
+                    &ps);
+
                 return 0;
             }
 
@@ -144,25 +220,30 @@ namespace TuningControl
             wc.lpfnWndProc = OverlayProc;
             wc.hInstance = instance;
             wc.lpszClassName = className;
-            wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+            wc.hCursor =
+                LoadCursor(
+                    nullptr,
+                    IDC_ARROW);
 
             RegisterClassW(&wc);
 
-            g_font = CreateFontW(
-                -26,
-                0,
-                0,
-                0,
-                FW_SEMIBOLD,
-                FALSE,
-                FALSE,
-                FALSE,
-                DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                DEFAULT_PITCH | FF_DONTCARE,
-                L"Segoe UI");
+            g_font =
+                CreateFontW(
+                    -26,
+                    0,
+                    0,
+                    0,
+                    FW_SEMIBOLD,
+                    FALSE,
+                    FALSE,
+                    FALSE,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    DEFAULT_PITCH |
+                        FF_DONTCARE,
+                    L"Segoe UI");
 
             g_overlay =
                 CreateWindowExW(
@@ -176,7 +257,7 @@ namespace TuningControl
                     WS_POPUP,
                     40,
                     40,
-                    360,
+                    420,
                     68,
                     nullptr,
                     nullptr,
@@ -200,24 +281,24 @@ namespace TuningControl
             if (!g_overlay)
                 return;
 
-            InvalidateRect(g_overlay, nullptr, TRUE);
+            InvalidateRect(
+                g_overlay,
+                nullptr,
+                TRUE);
 
             SetWindowPos(
                 g_overlay,
                 HWND_TOPMOST,
                 40,
                 40,
-                360,
+                420,
                 68,
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
 
-            g_hideAt = GetTickCount64() + 1800;
-        }
-
-        bool KeyPressed(int virtualKey)
-        {
-            return (GetAsyncKeyState(virtualKey) & 1) != 0;
+            g_hideAt =
+                GetTickCount64() +
+                1800;
         }
     }
 
@@ -225,6 +306,10 @@ namespace TuningControl
     {
         Apply();
         CreateOverlay();
+
+        g_lastAsioStatus =
+            AsioPassthrough::GetStatus();
+
         ShowOverlay();
         return true;
     }
@@ -233,47 +318,59 @@ namespace TuningControl
     {
         bool changed = false;
 
-        if (KeyPressed(KEY_DROP_DOWN))
+        if (KeyPressed(
+                KEY_DROP_DOWN))
         {
-            if (g_dropSemitones > MIN_DROP)
+            if (g_dropSemitones >
+                MIN_DROP)
             {
                 --g_dropSemitones;
                 changed = true;
             }
         }
 
-        if (KeyPressed(KEY_DROP_UP))
+        if (KeyPressed(
+                KEY_DROP_UP))
         {
-            if (g_dropSemitones < MAX_DROP)
+            if (g_dropSemitones <
+                MAX_DROP)
             {
                 ++g_dropSemitones;
                 changed = true;
             }
         }
 
-        if (KeyPressed(KEY_REF_DOWN))
+        if (KeyPressed(
+                KEY_REF_DOWN))
         {
-            if (g_referenceHz > MIN_REFERENCE_HZ)
+            if (g_referenceHz >
+                MIN_REFERENCE_HZ)
             {
                 --g_referenceHz;
                 changed = true;
             }
         }
 
-        if (KeyPressed(KEY_REF_UP))
+        if (KeyPressed(
+                KEY_REF_UP))
         {
-            if (g_referenceHz < MAX_REFERENCE_HZ)
+            if (g_referenceHz <
+                MAX_REFERENCE_HZ)
             {
                 ++g_referenceHz;
                 changed = true;
             }
         }
 
-        if (KeyPressed(KEY_REF_RESET))
+        if (KeyPressed(
+                KEY_REF_RESET))
         {
-            if (g_referenceHz != DEFAULT_REFERENCE_HZ)
+            if (g_referenceHz !=
+                DEFAULT_REFERENCE_HZ)
             {
-                g_referenceHz = DEFAULT_REFERENCE_HZ;
+                g_referenceHz =
+                    DEFAULT_REFERENCE_HZ;
+
                 changed = true;
             }
             else
@@ -288,25 +385,28 @@ namespace TuningControl
             ShowOverlay();
         }
 
-        MSG message{};
+        const auto asioStatus =
+            AsioPassthrough::GetStatus();
 
-        while (PeekMessage(
-            &message,
-            nullptr,
-            0,
-            0,
-            PM_REMOVE))
+        if (asioStatus !=
+            g_lastAsioStatus)
         {
-            TranslateMessage(&message);
-            DispatchMessage(&message);
+            g_lastAsioStatus =
+                asioStatus;
+
+            ShowOverlay();
         }
 
         if (g_overlay &&
             IsWindowVisible(g_overlay) &&
             g_hideAt != 0 &&
-            GetTickCount64() >= g_hideAt)
+            GetTickCount64() >=
+                g_hideAt)
         {
-            ShowWindow(g_overlay, SW_HIDE);
+            ShowWindow(
+                g_overlay,
+                SW_HIDE);
+
             g_hideAt = 0;
         }
     }

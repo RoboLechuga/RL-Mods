@@ -33,7 +33,7 @@ namespace Audio
         constexpr int DEFAULT_REFERENCE_HZ = 440;
 
         constexpr float RATIO_SLEW_MS = 10.0f;
-        constexpr float BYPASS_RAMP_MS = 6.0f;
+        constexpr float DUCK_HALF_MS = 5.0f;
 
         constexpr float MIN_RATIO = 0.45f;
         constexpr float MAX_RATIO = 2.05f;
@@ -68,7 +68,9 @@ namespace Audio
 
     void RealtimePitchShifter::SetSemitones(int semitones)
     {
-        SetTuning(semitones, DEFAULT_REFERENCE_HZ);
+        SetTuning(
+            semitones,
+            DEFAULT_REFERENCE_HZ);
     }
 
     void RealtimePitchShifter::SetTuning(
@@ -79,18 +81,22 @@ namespace Audio
             referenceHz = DEFAULT_REFERENCE_HZ;
 
         targetRatio.store(
-            RatioForTuning(semitones, referenceHz),
+            RatioForTuning(
+                semitones,
+                referenceHz),
             std::memory_order_relaxed);
 
         neutral.store(
             semitones == 0 &&
-            referenceHz == DEFAULT_REFERENCE_HZ,
+            referenceHz ==
+                DEFAULT_REFERENCE_HZ,
             std::memory_order_relaxed);
     }
 
     bool RealtimePitchShifter::IsNeutral() const
     {
-        return neutral.load(std::memory_order_relaxed);
+        return neutral.load(
+            std::memory_order_relaxed);
     }
 
     void RealtimePitchShifter::ResetState()
@@ -114,7 +120,8 @@ namespace Audio
     {
         sampleRate =
             format.sampleRate > 0
-                ? static_cast<float>(format.sampleRate)
+                ? static_cast<float>(
+                    format.sampleRate)
                 : 48000.0f;
 
         ResetState();
@@ -131,18 +138,21 @@ namespace Audio
                 RATIO_SLEW_MS *
                 0.001f);
 
-        wetStep =
+        duckStep =
             1.0f /
             std::max(
                 1.0f,
                 sampleRate *
-                BYPASS_RAMP_MS *
+                DUCK_HALF_MS *
                 0.001f);
 
-        wetMix =
-            IsNeutral()
-                ? 0.0f
-                : 1.0f;
+        usingWetPath =
+            !IsNeutral();
+
+        pathTransition =
+            PathTransition::Stable;
+
+        outputGain = 1.0f;
     }
 
     void RealtimePitchShifter::Fft(
@@ -186,14 +196,21 @@ namespace Audio
                 fftBuffer[j] = temp;
 
                 temp = fftBuffer[i + 1];
-                fftBuffer[i + 1] = fftBuffer[j + 1];
+                fftBuffer[i + 1] =
+                    fftBuffer[j + 1];
+
                 fftBuffer[j + 1] = temp;
             }
         }
 
         long stages = 0;
-        for (long n = frameSize; n > 1; n >>= 1)
+
+        for (long n = frameSize;
+             n > 1;
+             n >>= 1)
+        {
             ++stages;
+        }
 
         for (long stage = 0;
              stage < stages;
@@ -211,6 +228,7 @@ namespace Audio
                     le2 >> 1);
 
             wr = std::cos(arg);
+
             wi =
                 static_cast<float>(sign) *
                 std::sin(arg);
@@ -224,7 +242,8 @@ namespace Audio
                      i += le)
                 {
                     const long p1 = i;
-                    const long p2 = p1 + le2;
+                    const long p2 =
+                        p1 + le2;
 
                     tr =
                         fftBuffer[p2] * ur -
@@ -355,11 +374,15 @@ namespace Audio
                     PI);
 
             if (quadrant >= 0)
+            {
                 quadrant +=
                     quadrant & 1;
+            }
             else
+            {
                 quadrant -=
                     quadrant & 1;
+            }
 
             delta -=
                 PI *
@@ -433,9 +456,11 @@ namespace Audio
                 static_cast<float>(k) *
                 expectedPhase;
 
-            sumPhase[k] = std::remainder(
-                sumPhase[k] + frequency,
-                2.0f * PI);
+            sumPhase[k] =
+                std::remainder(
+                    sumPhase[k] +
+                        frequency,
+                    2.0f * PI);
 
             const float phase =
                 sumPhase[k];
@@ -527,10 +552,6 @@ namespace Audio
             targetRatio.load(
                 std::memory_order_relaxed);
 
-        const bool nowNeutral =
-            neutral.load(
-                std::memory_order_relaxed);
-
         for (std::uint32_t i = 0;
              i < frameCount;
              ++i)
@@ -555,53 +576,81 @@ namespace Audio
                         : -ratioStep;
             }
 
+            // Keep the STFT warm in neutral so the shifted path always has
+            // valid history when it is selected.
             const float wet =
                 ProcessOne(
                     dry,
                     currentRatio);
 
-            const float targetWet =
-                nowNeutral
-                    ? 0.0f
-                    : 1.0f;
+            const bool requestedWetPath =
+                !neutral.load(
+                    std::memory_order_relaxed);
 
-            if (wetMix < targetWet)
+            if (pathTransition ==
+                    PathTransition::Stable &&
+                requestedWetPath !=
+                    usingWetPath)
             {
-                wetMix =
-                    std::min(
-                        targetWet,
-                        wetMix +
-                        wetStep);
+                pathTransition =
+                    PathTransition::FadeOut;
             }
-            else if (wetMix > targetWet)
+
+            if (pathTransition ==
+                PathTransition::FadeOut)
             {
-                wetMix =
+                outputGain =
                     std::max(
-                        targetWet,
-                        wetMix -
-                        wetStep);
+                        0.0f,
+                        outputGain -
+                            duckStep);
+
+                if (outputGain <= 0.0f)
+                {
+                    // The actual zero-latency/delayed path swap occurs only
+                    // at silence, avoiding both a comb crossfade and a hard
+                    // 16 ms discontinuity.
+                    usingWetPath =
+                        requestedWetPath;
+
+                    pathTransition =
+                        PathTransition::FadeIn;
+                }
+            }
+            else if (pathTransition ==
+                PathTransition::FadeIn)
+            {
+                outputGain =
+                    std::min(
+                        1.0f,
+                        outputGain +
+                            duckStep);
+
+                if (outputGain >= 1.0f)
+                {
+                    pathTransition =
+                        PathTransition::Stable;
+                }
             }
 
-            if (nowNeutral)
+            float selected = dry;
+
+            if (usingWetPath)
             {
-                // True neutral path: never let the DSP result participate in
-                // the audible sample at E Standard / A440. The shifter still
-                // runs above so its internal state remains warm.
-                samples[i] = dry;
+                if (std::isfinite(wet))
+                {
+                    selected = wet;
+                }
+                else
+                {
+                    // A bad DSP value must never reach the ASIO buffer.
+                    selected = dry;
+                }
             }
-            else if (std::isfinite(wet))
-            {
-                samples[i] =
-                    dry +
-                    (wet - dry) *
-                        wetMix;
-            }
-            else
-            {
-                // Fail safe: a bad DSP value must never be written back to
-                // the ASIO input buffer.
-                samples[i] = dry;
-            }
+
+            samples[i] =
+                selected *
+                outputGain;
         }
     }
 

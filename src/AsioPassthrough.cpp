@@ -78,9 +78,8 @@ namespace AsioPassthrough
 
         struct PlayerInput
         {
-            // RS_ASIO Channel= is treated as the index among discovered
-            // ASIO input channels, matching the known-good single-player build.
-            int inputIndex = -1;
+            // RS_ASIO.ini Channel= is the ASIO channel number.
+            int inputChannel = -1;
 
             void* buffers[2] = {};
             long sampleType = -1;
@@ -103,8 +102,12 @@ namespace AsioPassthrough
 
         std::atomic<bool> installed{ false };
         std::atomic<bool> processingReady{ false };
+        std::atomic<Status> status{ Status::NotInstalled };
 
-        void* PatchVTableSlot(void* object, size_t slotIndex, void* replacement)
+        void* PatchVTableSlot(
+            void* object,
+            size_t slotIndex,
+            void* replacement)
         {
             if (!object) return nullptr;
 
@@ -119,13 +122,19 @@ namespace AsioPassthrough
                     sizeof(void*),
                     PAGE_EXECUTE_READWRITE,
                     &oldProtect))
+            {
                 return nullptr;
+            }
 
             void* original = *slot;
             *slot = replacement;
 
             DWORD ignored = 0;
-            VirtualProtect(slot, sizeof(void*), oldProtect, &ignored);
+            VirtualProtect(
+                slot,
+                sizeof(void*),
+                oldProtect,
+                &ignored);
 
             return original;
         }
@@ -135,14 +144,23 @@ namespace AsioPassthrough
             char driver[512] = {};
 
             GetPrivateProfileStringA(
-                "Asio.Input.0", "Driver", "",
-                driver, sizeof(driver), ".\\RS_ASIO.ini");
+                "Asio.Input.0",
+                "Driver",
+                "",
+                driver,
+                sizeof(driver),
+                ".\\RS_ASIO.ini");
 
-            if (driver[0]) return driver;
+            if (driver[0])
+                return driver;
 
             GetPrivateProfileStringA(
-                "Asio.Output", "Driver", "",
-                driver, sizeof(driver), ".\\RS_ASIO.ini");
+                "Asio.Output",
+                "Driver",
+                "",
+                driver,
+                sizeof(driver),
+                ".\\RS_ASIO.ini");
 
             return driver;
         }
@@ -164,18 +182,24 @@ namespace AsioPassthrough
                     ".\\RS_ASIO.ini"));
         }
 
-        bool ReadDriverClassId(const std::string& name, CLSID& clsid)
+        bool ReadDriverClassId(
+            const std::string& name,
+            CLSID& clsid)
         {
-            std::string keyPath = "SOFTWARE\\ASIO\\" + name;
+            std::string keyPath =
+                "SOFTWARE\\ASIO\\" + name;
 
             HKEY key = nullptr;
+
             if (RegOpenKeyExA(
                     HKEY_LOCAL_MACHINE,
                     keyPath.c_str(),
                     0,
                     KEY_READ,
                     &key) != ERROR_SUCCESS)
+            {
                 return false;
+            }
 
             char value[128] = {};
             DWORD size = sizeof(value);
@@ -191,8 +215,11 @@ namespace AsioPassthrough
 
             RegCloseKey(key);
 
-            if (result != ERROR_SUCCESS || type != REG_SZ)
+            if (result != ERROR_SUCCESS ||
+                type != REG_SZ)
+            {
                 return false;
+            }
 
             wchar_t wideValue[128] = {};
 
@@ -205,10 +232,13 @@ namespace AsioPassthrough
                 ARRAYSIZE(wideValue));
 
             return SUCCEEDED(
-                CLSIDFromString(wideValue, &clsid));
+                CLSIDFromString(
+                    wideValue,
+                    &clsid));
         }
 
-        std::wstring ReadDriverModulePath(const CLSID& clsid)
+        std::wstring ReadDriverModulePath(
+            const CLSID& clsid)
         {
             wchar_t clsidText[128] = {};
 
@@ -216,9 +246,13 @@ namespace AsioPassthrough
                     clsid,
                     clsidText,
                     ARRAYSIZE(clsidText)))
+            {
                 return {};
+            }
 
-            std::wstring keyPath = L"CLSID\\";
+            std::wstring keyPath =
+                L"CLSID\\";
+
             keyPath += clsidText;
             keyPath += L"\\InprocServer32";
 
@@ -230,7 +264,9 @@ namespace AsioPassthrough
                     0,
                     KEY_READ,
                     &key) != ERROR_SUCCESS)
+            {
                 return {};
+            }
 
             wchar_t modulePath[MAX_PATH] = {};
             DWORD size = sizeof(modulePath);
@@ -249,75 +285,112 @@ namespace AsioPassthrough
             if (result != ERROR_SUCCESS)
                 return {};
 
-            if (type != REG_SZ && type != REG_EXPAND_SZ)
+            if (type != REG_SZ &&
+                type != REG_EXPAND_SZ)
+            {
                 return {};
+            }
 
             return modulePath;
         }
 
-        void ProcessInputBuffer(long doubleBufferIndex)
+        void ProcessInputBuffer(
+            long doubleBufferIndex)
         {
-            if (!processingReady.load(std::memory_order_acquire))
+            if (!processingReady.load(
+                    std::memory_order_acquire))
+            {
                 return;
+            }
 
-            if (doubleBufferIndex < 0 || doubleBufferIndex > 1)
+            if (doubleBufferIndex < 0 ||
+                doubleBufferIndex > 1)
+            {
                 return;
+            }
 
             if (activeBufferFrames <= 0 ||
                 activeBufferFrames > MAX_BUFFER_FRAMES)
+            {
                 return;
+            }
 
             const size_t count =
-                static_cast<size_t>(activeBufferFrames);
+                static_cast<size_t>(
+                    activeBufferFrames);
 
-            for (int player = 0; player < MAX_PLAYERS; ++player)
+            for (int player = 0;
+                 player < MAX_PLAYERS;
+                 ++player)
             {
-                auto& input = playerInputs[player];
+                auto& input =
+                    playerInputs[player];
 
                 if (!input.active)
                     continue;
 
-                if (input.sampleType != ASIOSTInt32LSB)
+                if (input.sampleType !=
+                    ASIOSTInt32LSB)
+                {
                     continue;
+                }
 
                 auto* samples =
                     reinterpret_cast<std::int32_t*>(
-                        input.buffers[doubleBufferIndex]);
+                        input.buffers[
+                            doubleBufferIndex]);
 
                 if (!samples)
                     continue;
 
-                for (size_t i = 0; i < count; ++i)
+                for (size_t i = 0;
+                     i < count;
+                     ++i)
                 {
                     input.conversionBuffer[i] =
-                        static_cast<float>(samples[i]) *
+                        static_cast<float>(
+                            samples[i]) *
                         INT32_TO_FLOAT;
                 }
 
                 input.shifter.Process(
                     input.conversionBuffer.data(),
-                    static_cast<std::uint32_t>(activeBufferFrames));
+                    static_cast<std::uint32_t>(
+                        activeBufferFrames));
 
-                for (size_t i = 0; i < count; ++i)
+                for (size_t i = 0;
+                     i < count;
+                     ++i)
                 {
-                    float value = input.conversionBuffer[i];
+                    float value =
+                        input.conversionBuffer[i];
 
-                    if (value < -1.0f) value = -1.0f;
-                    if (value > 1.0f) value = 1.0f;
+                    if (value < -1.0f)
+                        value = -1.0f;
+
+                    if (value > 1.0f)
+                        value = 1.0f;
 
                     samples[i] =
                         static_cast<std::int32_t>(
-                            value * FLOAT_TO_INT32);
+                            value *
+                            FLOAT_TO_INT32);
                 }
             }
         }
 
-        void HookBufferSwitch(long index, ASIOBool directProcess)
+        void HookBufferSwitch(
+            long index,
+            ASIOBool directProcess)
         {
             ProcessInputBuffer(index);
 
             if (originalCallbacks.bufferSwitch)
-                originalCallbacks.bufferSwitch(index, directProcess);
+            {
+                originalCallbacks.bufferSwitch(
+                    index,
+                    directProcess);
+            }
         }
 
         ASIOTime* HookBufferSwitchTimeInfo(
@@ -327,9 +400,16 @@ namespace AsioPassthrough
         {
             ProcessInputBuffer(index);
 
-            if (originalCallbacks.bufferSwitchTimeInfo)
-                return originalCallbacks.bufferSwitchTimeInfo(
-                    params, index, directProcess);
+            if (originalCallbacks
+                    .bufferSwitchTimeInfo)
+            {
+                return
+                    originalCallbacks
+                        .bufferSwitchTimeInfo(
+                            params,
+                            index,
+                            directProcess);
+            }
 
             return params;
         }
@@ -347,15 +427,25 @@ namespace AsioPassthrough
 
             if (callbacks)
             {
-                originalCallbacks = *callbacks;
+                originalCallbacks =
+                    *callbacks;
 
-                hookedCallbacks.bufferSwitch = HookBufferSwitch;
-                hookedCallbacks.sampleRateDidChange =
-                    originalCallbacks.sampleRateDidChange;
+                hookedCallbacks.bufferSwitch =
+                    HookBufferSwitch;
+
+                hookedCallbacks
+                    .sampleRateDidChange =
+                    originalCallbacks
+                        .sampleRateDidChange;
+
                 hookedCallbacks.asioMessage =
-                    originalCallbacks.asioMessage;
-                hookedCallbacks.bufferSwitchTimeInfo =
-                    originalCallbacks.bufferSwitchTimeInfo
+                    originalCallbacks
+                        .asioMessage;
+
+                hookedCallbacks
+                    .bufferSwitchTimeInfo =
+                    originalCallbacks
+                        .bufferSwitchTimeInfo
                     ? HookBufferSwitchTimeInfo
                     : nullptr;
             }
@@ -367,83 +457,131 @@ namespace AsioPassthrough
                     infos,
                     numChannels,
                     bufferSize,
-                    callbacks ? &hookedCallbacks : nullptr);
+                    callbacks
+                        ? &hookedCallbacks
+                        : nullptr);
 
             if (result != ASE_OK)
                 return result;
 
-            processingReady.store(false, std::memory_order_release);
+            processingReady.store(
+                false,
+                std::memory_order_release);
 
-            activeBufferFrames = bufferSize;
+            activeBufferFrames =
+                bufferSize;
 
-            for (int player = 0; player < MAX_PLAYERS; ++player)
+            for (int player = 0;
+                 player < MAX_PLAYERS;
+                 ++player)
             {
-                playerInputs[player].buffers[0] = nullptr;
-                playerInputs[player].buffers[1] = nullptr;
-                playerInputs[player].sampleType = -1;
-                playerInputs[player].active = false;
+                playerInputs[player]
+                    .buffers[0] = nullptr;
+
+                playerInputs[player]
+                    .buffers[1] = nullptr;
+
+                playerInputs[player]
+                    .sampleType = -1;
+
+                playerInputs[player]
+                    .active = false;
             }
 
+            const bool duplicateChannel =
+                playerInputs[0].inputChannel >= 0 &&
+                playerInputs[0].inputChannel ==
+                    playerInputs[1].inputChannel;
+
             auto getChannelInfo =
-                reinterpret_cast<GetChannelInfo_t>(
-                    (*reinterpret_cast<void***>(self))
+                reinterpret_cast<
+                    GetChannelInfo_t>(
+                    (*reinterpret_cast<
+                        void***>(self))
                         [SLOT_ASIO_GET_CHANNEL_INFO]);
 
-            int discoveredInputIndex = 0;
+            int boundInputs = 0;
 
-            for (long i = 0; i < numChannels; ++i)
+            for (long i = 0;
+                 i < numChannels;
+                 ++i)
             {
                 if (!infos[i].isInput)
                     continue;
 
-                for (int player = 0; player < MAX_PLAYERS; ++player)
+                bool channelClaimed =
+                    false;
+
+                for (int player = 0;
+                     player < MAX_PLAYERS;
+                     ++player)
                 {
-                    auto& input = playerInputs[player];
+                    auto& input =
+                        playerInputs[player];
 
-                    if (input.inputIndex < 0)
+                    if (input.inputChannel < 0)
                         continue;
 
-                    if (discoveredInputIndex != input.inputIndex)
+                    if (infos[i].channelNum !=
+                        input.inputChannel)
+                    {
+                        continue;
+                    }
+
+                    // Never process the same ASIO buffer twice.
+                    if (channelClaimed)
                         continue;
 
-                    input.buffers[0] = infos[i].buffers[0];
-                    input.buffers[1] = infos[i].buffers[1];
+                    input.buffers[0] =
+                        infos[i].buffers[0];
+
+                    input.buffers[1] =
+                        infos[i].buffers[1];
 
                     ASIOChannelInfo channelInfo{};
-                    channelInfo.channel = infos[i].channelNum;
+                    channelInfo.channel =
+                        infos[i].channelNum;
+
                     channelInfo.isInput = 1;
 
                     if (getChannelInfo &&
                         getChannelInfo(
                             self,
                             nullptr,
-                            &channelInfo) == ASE_OK)
+                            &channelInfo) ==
+                            ASE_OK)
                     {
-                        input.sampleType = channelInfo.type;
+                        input.sampleType =
+                            channelInfo.type;
                     }
 
                     input.active = true;
+                    channelClaimed = true;
+                    ++boundInputs;
                 }
-
-                ++discoveredInputIndex;
             }
 
-            ASIOSampleRate sampleRate = 0.0;
+            ASIOSampleRate sampleRate =
+                0.0;
 
             auto getSampleRate =
-                reinterpret_cast<GetSampleRate_t>(
-                    (*reinterpret_cast<void***>(self))
+                reinterpret_cast<
+                    GetSampleRate_t>(
+                    (*reinterpret_cast<
+                        void***>(self))
                         [SLOT_ASIO_GET_SAMPLE_RATE]);
 
             if (getSampleRate &&
                 getSampleRate(
                     self,
                     nullptr,
-                    &sampleRate) == ASE_OK &&
+                    &sampleRate) ==
+                    ASE_OK &&
                 sampleRate > 0.0)
             {
                 format.sampleRate =
-                    static_cast<std::uint32_t>(sampleRate);
+                    static_cast<std::uint32_t>(
+                        sampleRate);
             }
             else
             {
@@ -455,28 +593,39 @@ namespace AsioPassthrough
             bool anyReady = false;
 
             if (bufferSize > 0 &&
-                bufferSize <= MAX_BUFFER_FRAMES &&
+                bufferSize <=
+                    MAX_BUFFER_FRAMES &&
                 format.sampleRate > 0)
             {
-                for (int player = 0; player < MAX_PLAYERS; ++player)
+                for (int player = 0;
+                     player < MAX_PLAYERS;
+                     ++player)
                 {
-                    auto& input = playerInputs[player];
+                    auto& input =
+                        playerInputs[player];
 
                     if (!input.active)
                         continue;
 
-                    if (input.sampleType != ASIOSTInt32LSB)
+                    if (input.sampleType !=
+                        ASIOSTInt32LSB)
+                    {
                         continue;
+                    }
 
-                    Audio::CaptureFormat playerFormat = format;
+                    Audio::CaptureFormat
+                        playerFormat = format;
+
                     playerFormat.sampleFormat =
                         Audio::SampleFormat::Int32;
 
                     input.conversionBuffer.assign(
-                        static_cast<size_t>(MAX_BUFFER_FRAMES),
+                        static_cast<size_t>(
+                            MAX_BUFFER_FRAMES),
                         0.0f);
 
-                    input.shifter.Prepare(playerFormat);
+                    input.shifter.Prepare(
+                        playerFormat);
 
                     anyReady = true;
                 }
@@ -485,6 +634,31 @@ namespace AsioPassthrough
             processingReady.store(
                 anyReady,
                 std::memory_order_release);
+
+            if (duplicateChannel)
+            {
+                status.store(
+                    Status::DuplicateChannel,
+                    std::memory_order_release);
+            }
+            else if (boundInputs == 0)
+            {
+                status.store(
+                    Status::NoChannelsBound,
+                    std::memory_order_release);
+            }
+            else if (!anyReady)
+            {
+                status.store(
+                    Status::UnsupportedFormat,
+                    std::memory_order_release);
+            }
+            else
+            {
+                status.store(
+                    Status::Ready,
+                    std::memory_order_release);
+            }
 
             return result;
         }
@@ -505,13 +679,18 @@ namespace AsioPassthrough
                     riid,
                     created);
 
-            if (FAILED(result) || !created || !*created)
+            if (FAILED(result) ||
+                !created ||
+                !*created)
+            {
                 return result;
+            }
 
             if (!originalCreateBuffers)
             {
                 originalCreateBuffers =
-                    reinterpret_cast<CreateBuffers_t>(
+                    reinterpret_cast<
+                        CreateBuffers_t>(
                         PatchVTableSlot(
                             *created,
                             SLOT_ASIO_CREATE_BUFFERS,
@@ -528,35 +707,51 @@ namespace AsioPassthrough
         if (installed.load())
             return true;
 
-        for (int player = 0; player < MAX_PLAYERS; ++player)
+        status.store(
+            Status::NotInstalled,
+            std::memory_order_release);
+
+        for (int player = 0;
+             player < MAX_PLAYERS;
+             ++player)
         {
-            playerInputs[player].inputIndex =
+            playerInputs[player]
+                .inputChannel =
                 ReadInputChannel(player);
         }
 
-        const std::string driverName = ReadDriverName();
+        const std::string driverName =
+            ReadDriverName();
+
         if (driverName.empty())
             return false;
 
         CLSID driverClsid{};
 
-        if (!ReadDriverClassId(driverName, driverClsid))
+        if (!ReadDriverClassId(
+                driverName,
+                driverClsid))
+        {
             return false;
+        }
 
         const std::wstring modulePath =
-            ReadDriverModulePath(driverClsid);
+            ReadDriverModulePath(
+                driverClsid);
 
         if (modulePath.empty())
             return false;
 
         HMODULE driverModule =
-            LoadLibraryW(modulePath.c_str());
+            LoadLibraryW(
+                modulePath.c_str());
 
         if (!driverModule)
             return false;
 
         auto dllGetClassObject =
-            reinterpret_cast<DllGetClassObject_t>(
+            reinterpret_cast<
+                DllGetClassObject_t>(
                 GetProcAddress(
                     driverModule,
                     "DllGetClassObject"));
@@ -564,19 +759,25 @@ namespace AsioPassthrough
         if (!dllGetClassObject)
             return false;
 
-        IClassFactory* factory = nullptr;
+        IClassFactory* factory =
+            nullptr;
 
         HRESULT hr =
             dllGetClassObject(
                 driverClsid,
                 IID_IClassFactory,
-                reinterpret_cast<void**>(&factory));
+                reinterpret_cast<void**>(
+                    &factory));
 
-        if (FAILED(hr) || !factory)
+        if (FAILED(hr) ||
+            !factory)
+        {
             return false;
+        }
 
         originalCreateInstance =
-            reinterpret_cast<CreateInstance_t>(
+            reinterpret_cast<
+                CreateInstance_t>(
                 PatchVTableSlot(
                     factory,
                     SLOT_CLASS_FACTORY_CREATE_INSTANCE,
@@ -588,22 +789,68 @@ namespace AsioPassthrough
         if (!originalCreateInstance)
             return false;
 
-        installed.store(true);
+        installed.store(
+            true,
+            std::memory_order_release);
+
+        status.store(
+            Status::WaitingForBuffers,
+            std::memory_order_release);
+
         return true;
     }
 
-    void SetTuning(int semitones, int referenceHz)
+    void SetTuning(
+        int semitones,
+        int referenceHz)
     {
-        for (int player = 0; player < MAX_PLAYERS; ++player)
+        for (int player = 0;
+             player < MAX_PLAYERS;
+             ++player)
         {
-            playerInputs[player].shifter.SetTuning(
-                semitones,
-                referenceHz);
+            playerInputs[player]
+                .shifter.SetTuning(
+                    semitones,
+                    referenceHz);
         }
     }
 
     bool IsInstalled()
     {
-        return installed.load();
+        return installed.load(
+            std::memory_order_acquire);
+    }
+
+    Status GetStatus()
+    {
+        return status.load(
+            std::memory_order_acquire);
+    }
+
+    const char* GetStatusText()
+    {
+        switch (GetStatus())
+        {
+        case Status::NotInstalled:
+            return "ASIO hook failed";
+
+        case Status::WaitingForBuffers:
+            return "ASIO: waiting for audio";
+
+        case Status::NoChannelsBound:
+            return "ASIO: no input channel bound";
+
+        case Status::UnsupportedFormat:
+            return "ASIO: unsupported input format";
+
+        case Status::DuplicateChannel:
+            return "ASIO: duplicate input Channel";
+
+        case Status::Ready:
+            return "ASIO: ready";
+
+        default:
+            return "ASIO: unknown";
+        }
     }
 }

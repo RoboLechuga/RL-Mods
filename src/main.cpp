@@ -59,6 +59,30 @@ namespace
         return true;
     }
 
+    bool IsRocksmithForeground()
+    {
+        HWND foreground = GetForegroundWindow();
+        if (!foreground)
+            return false;
+
+        DWORD processId = 0;
+        GetWindowThreadProcessId(foreground, &processId);
+
+        return processId == GetCurrentProcessId();
+    }
+
+    bool KeyPressedInRocksmith(int virtualKey)
+    {
+        // Always consume GetAsyncKeyState's low-bit latch, even while Rocksmith
+        // is unfocused, so presses do not fire later when focus returns.
+        const SHORT state = GetAsyncKeyState(virtualKey);
+
+        if ((state & 1) == 0)
+            return false;
+
+        return IsRocksmithForeground();
+    }
+
     bool IsReadableAddress(const void* address)
     {
         if (!address)
@@ -111,8 +135,43 @@ namespace
         return (mbi.Protect & writable) != 0;
     }
 
+    bool IsOffsetInsideModule(
+        std::uintptr_t base,
+        std::uintptr_t offset,
+        size_t bytes)
+    {
+        if (!base)
+            return false;
+
+        const auto* dos =
+            reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+
+        if (!IsReadableAddress(dos) ||
+            dos->e_magic != IMAGE_DOS_SIGNATURE)
+            return false;
+
+        const auto* nt =
+            reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                base + static_cast<std::uintptr_t>(dos->e_lfanew));
+
+        if (!IsReadableAddress(nt) ||
+            nt->Signature != IMAGE_NT_SIGNATURE)
+            return false;
+
+        const std::uintptr_t imageSize =
+            static_cast<std::uintptr_t>(
+                nt->OptionalHeader.SizeOfImage);
+
+        if (offset >= imageSize)
+            return false;
+
+        return bytes <= imageSize - offset;
+    }
+
     std::uintptr_t ResolveEnumerationFlags()
     {
+        constexpr std::uintptr_t ENUMERATION_ROOT_OFFSET = 0x00F74E90;
+
         HMODULE gameModule = GetModuleHandleW(nullptr);
         if (!gameModule)
             return 0;
@@ -120,7 +179,16 @@ namespace
         const std::uintptr_t base =
             reinterpret_cast<std::uintptr_t>(gameModule);
 
-        std::uintptr_t addr = base + 0x00F74E90;
+        if (!IsOffsetInsideModule(
+                base,
+                ENUMERATION_ROOT_OFFSET,
+                sizeof(std::uintptr_t)))
+        {
+            return 0;
+        }
+
+        std::uintptr_t addr =
+            base + ENUMERATION_ROOT_OFFSET;
 
         if (!IsReadableAddress(reinterpret_cast<void*>(addr)))
             return 0;
@@ -151,12 +219,43 @@ namespace
         BYTE* flag1 = reinterpret_cast<BYTE*>(flags);
         BYTE* flag2 = reinterpret_cast<BYTE*>(flags + 4);
 
-        if (!IsWritableAddress(flag1) ||
+        if (!IsReadableAddress(flag1) ||
+            !IsReadableAddress(flag2) ||
+            !IsWritableAddress(flag1) ||
             !IsWritableAddress(flag2))
+        {
+            return;
+        }
+
+        const BYTE current1 =
+            *reinterpret_cast<volatile BYTE*>(flag1);
+
+        const BYTE current2 =
+            *reinterpret_cast<volatile BYTE*>(flag2);
+
+        // A stale pointer landing on arbitrary writable memory should no-op
+        // rather than corrupt game state.
+        if (current1 > 1 || current2 > 1)
             return;
 
         *reinterpret_cast<volatile BYTE*>(flag1) = 1;
         *reinterpret_cast<volatile BYTE*>(flag2) = 1;
+    }
+
+    void PumpMessages()
+    {
+        MSG message{};
+
+        while (PeekMessage(
+            &message,
+            nullptr,
+            0,
+            0,
+            PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessage(&message);
+        }
     }
 
     DWORD WINAPI WorkerThread(void*)
@@ -170,11 +269,13 @@ namespace
             TRUE,
             TRUE))
         {
-            if (GetAsyncKeyState(VK_F8) & 1)
+            if (KeyPressedInRocksmith(VK_F8))
                 ForceEnumeration();
 
             ScreenshotControl::Poll();
             TuningControl::Poll();
+            PumpMessages();
+
             Sleep(25);
         }
 
@@ -269,8 +370,9 @@ BOOL APIENTRY DllMain(
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(module);
-        InitRealXInput();
 
+        // Do not call LoadLibrary while the loader lock is held.
+        // XInput exports initialize the real system DLL lazily.
         HANDLE thread = CreateThread(
             nullptr,
             0,
