@@ -1,6 +1,7 @@
 #include <Windows.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 #include "ScreenshotControl.hpp"
@@ -14,6 +15,9 @@ namespace ScreenshotControl
         constexpr std::uintptr_t CURRENT_MENU_BASE = 0x00F6062C;
         constexpr ULONGLONG SCREENSHOT_DELAY_MS = 8000;
         constexpr int KEY_TOGGLE = VK_F9;
+        constexpr int KEY_FORCE_SCREENSHOT = VK_F10;
+
+        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test3";
 
         bool g_enabled = true;
         bool g_captured = false;
@@ -80,8 +84,6 @@ namespace ScreenshotControl
                 reinterpret_cast<std::uintptr_t>(gameModule) +
                 CURRENT_MENU_BASE;
 
-            // Same current-menu pointer chain used by RSMods:
-            // { 0x28, 0x8C, 0x0 }
             address = DereferenceAndAdd(address, 0x28);
             if (!address)
                 return 0;
@@ -137,45 +139,18 @@ namespace ScreenshotControl
                 menu == "H2H_SongReview";
         }
 
-        BOOL CALLBACK FindGameWindowProc(HWND hwnd, LPARAM parameter)
-        {
-            DWORD processId = 0;
-            GetWindowThreadProcessId(hwnd, &processId);
-
-            if (processId != GetCurrentProcessId())
-                return TRUE;
-            if (!IsWindowVisible(hwnd))
-                return TRUE;
-            if (GetWindow(hwnd, GW_OWNER) != nullptr)
-                return TRUE;
-            const LONG_PTR exStyle =
-            GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-
-            if (exStyle & WS_EX_TOOLWINDOW)
-            return TRUE;
-
-            *reinterpret_cast<HWND*>(parameter) = hwnd;
-            return FALSE;
-        }
-
-        HWND FindGameWindow()
-        {
-            HWND hwnd = nullptr;
-            EnumWindows(
-                FindGameWindowProc,
-                reinterpret_cast<LPARAM>(&hwnd));
-            return hwnd;
-        }
-
         void TakeScreenshot()
         {
-            const HWND gameWindow = FindGameWindow();
-            if (!gameWindow)
-                return;
+            INPUT inputs[2]{};
 
-            PostMessageW(gameWindow, WM_KEYDOWN, VK_F12, 0);
-            Sleep(30);
-            PostMessageW(gameWindow, WM_KEYUP, VK_F12, 0);
+            inputs[0].type = INPUT_KEYBOARD;
+            inputs[0].ki.wVk = VK_F12;
+
+            inputs[1].type = INPUT_KEYBOARD;
+            inputs[1].ki.wVk = VK_F12;
+            inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+
+            SendInput(2, inputs, sizeof(INPUT));
         }
 
         void ResetCapture()
@@ -187,9 +162,15 @@ namespace ScreenshotControl
 
         const char* OverlayText()
         {
-            return g_enabled
-                ? "Auto Screenshot: ON"
-                : "Auto Screenshot: OFF";
+            static char text[128] = {};
+
+            sprintf_s(
+                text,
+                "%s | Auto Screenshot: %s",
+                VERSION_TEXT,
+                g_enabled ? "ON" : "OFF");
+
+            return text;
         }
 
         LRESULT CALLBACK OverlayProc(
@@ -297,7 +278,7 @@ namespace ScreenshotControl
                     WS_POPUP,
                     40,
                     118,
-                    285,
+                    430,
                     58,
                     nullptr,
                     nullptr,
@@ -328,7 +309,7 @@ namespace ScreenshotControl
                 HWND_TOPMOST,
                 40,
                 118,
-                285,
+                430,
                 58,
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
@@ -356,6 +337,12 @@ namespace ScreenshotControl
         {
             g_enabled = !g_enabled;
             ResetCapture();
+            ShowOverlay();
+        }
+
+        if (KeyPressed(KEY_FORCE_SCREENSHOT))
+        {
+            TakeScreenshot();
             ShowOverlay();
         }
 
