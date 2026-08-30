@@ -39,7 +39,6 @@ If another mod already supplies `xinput1_3.dll`, back it up or remove it first. 
 - `F6` — Reduce screenshot delay by 1 second
 - `F7` — Increase screenshot delay by 1 second
 - `F8` — Re-enumerate songs
-- `F12` — Steam screenshot (native Rocksmith / Steam behavior)
 - `,` — Drop one semitone
 - `.` — Raise one semitone
 - `;` — Reference frequency -1 Hz
