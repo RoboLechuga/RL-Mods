@@ -10,7 +10,7 @@
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{7A10FD47-BA0A-43DC-A0BD-46762D8276A1}</ProjectGuid>
-    <RootNamespace>RSForceEnum</RootNamespace>
+    <RootNamespace>RLMods</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
