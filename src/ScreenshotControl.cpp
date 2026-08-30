@@ -15,9 +15,8 @@ namespace ScreenshotControl
         constexpr std::uintptr_t CURRENT_MENU_BASE = 0x00F6062C;
         constexpr ULONGLONG SCREENSHOT_DELAY_MS = 8000;
         constexpr int KEY_TOGGLE = VK_F9;
-        constexpr int KEY_FORCE_SCREENSHOT = VK_F10;
 
-        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test3";
+        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test4";
 
         bool g_enabled = true;
         bool g_captured = false;
@@ -340,12 +339,6 @@ namespace ScreenshotControl
             ShowOverlay();
         }
 
-        if (KeyPressed(KEY_FORCE_SCREENSHOT))
-        {
-            TakeScreenshot();
-            ShowOverlay();
-        }
-
         if (g_overlay &&
             IsWindowVisible(g_overlay) &&
             g_hideAt != 0 &&
@@ -364,6 +357,7 @@ namespace ScreenshotControl
         {
             if (!g_scoreMenu.empty())
                 ResetCapture();
+
             return;
         }
 
