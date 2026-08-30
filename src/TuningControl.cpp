@@ -17,21 +17,13 @@ namespace TuningControl
         constexpr int MAX_REFERENCE_HZ = 461;
         constexpr int DEFAULT_REFERENCE_HZ = 440;
 
-        // Controls:
-        // ,  = lower pitch one semitone
-        // .  = raise pitch one semitone
-        // ;  = reference -1 Hz
-        // '  = reference +1 Hz
-        // \  = reset reference to A440
-        //
-        // F8 remains force enumeration in main.cpp.
-        //
-        // These use the OEM virtual-key codes for a standard US keyboard.
-        constexpr int KEY_DROP_DOWN = VK_OEM_COMMA;    // ,
-        constexpr int KEY_DROP_UP   = VK_OEM_PERIOD;   // .
-        constexpr int KEY_REF_DOWN  = VK_OEM_1;        // ;
-        constexpr int KEY_REF_UP    = VK_OEM_7;        // '
-        constexpr int KEY_REF_RESET = VK_OEM_5;        // \
+        constexpr const char* VERSION_TEXT = "RLMods 1.0.1-test4";
+
+        constexpr int KEY_DROP_DOWN = VK_OEM_COMMA;
+        constexpr int KEY_DROP_UP   = VK_OEM_PERIOD;
+        constexpr int KEY_REF_DOWN  = VK_OEM_1;
+        constexpr int KEY_REF_UP    = VK_OEM_7;
+        constexpr int KEY_REF_RESET = VK_OEM_5;
 
         int g_dropSemitones = 0;
         int g_referenceHz = DEFAULT_REFERENCE_HZ;
@@ -42,23 +34,10 @@ namespace TuningControl
 
         const char* DropName(int semitones)
         {
-            // E-standard guitar reference, displayed as the resulting coarse tuning.
-            // -12 lands on E again; the octave is intentionally not shown.
             static const char* names[] =
             {
-                "E",   // 0
-                "Eb",  // -1
-                "D",   // -2
-                "C#",  // -3
-                "C",   // -4
-                "B",   // -5
-                "Bb",  // -6
-                "A",   // -7
-                "Ab",  // -8
-                "G",   // -9
-                "F#",  // -10
-                "F",   // -11
-                "E"    // -12
+                "E", "Eb", "D", "C#", "C", "B", "Bb",
+                "A", "Ab", "G", "F#", "F", "E"
             };
 
             int index = -semitones;
@@ -69,10 +48,12 @@ namespace TuningControl
 
         std::string CurrentText()
         {
-            char buffer[128] = {};
+            char buffer[160] = {};
+
             sprintf_s(
                 buffer,
-                "Drop: %s    Ref: A%d",
+                "%s | Drop: %s    Ref: A%d",
+                VERSION_TEXT,
                 DropName(g_dropSemitones),
                 g_referenceHz);
 
@@ -107,6 +88,7 @@ namespace TuningControl
 
                 HBRUSH background =
                     CreateSolidBrush(RGB(20, 20, 20));
+
                 FillRect(dc, &rect, background);
                 DeleteObject(background);
 
@@ -114,10 +96,13 @@ namespace TuningControl
                 SetTextColor(dc, RGB(245, 245, 245));
 
                 HFONT previousFont = nullptr;
+
                 if (g_font)
+                {
                     previousFont =
                         reinterpret_cast<HFONT>(
                             SelectObject(dc, g_font));
+                }
 
                 std::string text = CurrentText();
 
@@ -142,7 +127,11 @@ namespace TuningControl
                 return HTTRANSPARENT;
 
             default:
-                return DefWindowProc(hwnd, message, wParam, lParam);
+                return DefWindowProc(
+                    hwnd,
+                    message,
+                    wParam,
+                    lParam);
             }
         }
 
@@ -163,7 +152,7 @@ namespace TuningControl
             RegisterClassW(&wc);
 
             g_font = CreateFontW(
-                -28,
+                -26,
                 0,
                 0,
                 0,
@@ -190,7 +179,7 @@ namespace TuningControl
                     WS_POPUP,
                     40,
                     40,
-                    330,
+                    520,
                     68,
                     nullptr,
                     nullptr,
@@ -221,7 +210,7 @@ namespace TuningControl
                 HWND_TOPMOST,
                 40,
                 40,
-                330,
+                520,
                 68,
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
@@ -238,10 +227,7 @@ namespace TuningControl
     bool Initialize()
     {
         Apply();
-
-        // The audio controls work even if the OSD window cannot be created.
         CreateOverlay();
-
         ShowOverlay();
         return true;
     }
@@ -295,7 +281,6 @@ namespace TuningControl
             }
             else
             {
-                // Still show the confirmation even if already A440.
                 ShowOverlay();
             }
         }
@@ -307,6 +292,7 @@ namespace TuningControl
         }
 
         MSG message{};
+
         while (PeekMessage(
             &message,
             nullptr,
