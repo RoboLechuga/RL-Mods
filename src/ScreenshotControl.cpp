@@ -307,7 +307,6 @@ namespace ScreenshotControl
                     "F5        Auto Screenshot ON/OFF\n"
                     "F6 / F7   Screenshot delay -1s / +1s\n"
                     "F8        Refresh song enumeration\n"
-                    "F12       Steam screenshot (native)\n"
                     "\n"
                     "\"If it sounds bad, that's probably still you.\"\n"
                     "%s",
