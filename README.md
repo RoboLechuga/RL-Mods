@@ -10,6 +10,7 @@ A lightweight Rocksmith 2014 Remastered mod focused on practical quality-of-life
 - Alternate tuning reference from A420 through A461
 - True dry bypass at E Standard / A440
 - Small on-screen tuning display
+- ASIO readiness and error reporting in the tuning display
 - Two-player / multiplayer ASIO input support
 - Automatic score screenshots on Rocksmith result screens
 - Adjustable screenshot delay with persistent settings
@@ -45,6 +46,8 @@ If another mod already supplies `xinput1_3.dll`, back it up or remove it first. 
 - `'` — Reference frequency +1 Hz
 - `\` — Reset reference to A440
 
+RL-Mods hotkeys only act while Rocksmith owns the foreground window. Key presses made while another application has focus are discarded rather than queued for later.
+
 Screenshot delay is limited to 3–20 seconds.
 
 ## Screenshot Settings
@@ -61,7 +64,7 @@ Debug=0
 ```
 
 - `Enabled=1` enables automatic score screenshots.
-- `DelayMs` controls how long RL-Mods waits after detecting a score screen before triggering Steam's screenshot key.
+- `DelayMs` controls how long RL-Mods waits after detecting a score screen before triggering Steam screenshot capture.
 - `Debug=1` enables the diagnostic screenshot overlay showing the detected Rocksmith menu and capture status.
 
 The screenshot settings persist between Rocksmith sessions.
@@ -75,9 +78,35 @@ RL-Mods watches for Rocksmith result screens including:
 - Duet
 - Head-to-Head
 
-When one is detected, RL-Mods waits for the configured delay and triggers the normal Steam `F12` screenshot action once.
+When one is detected, RL-Mods waits for the configured delay and triggers Steam screenshot capture once.
+
+If Rocksmith loses focus before the delay expires, the capture remains armed but is not sent to the foreground application. If the same score screen is still active when Rocksmith regains focus, the screenshot is taken then.
 
 The default delay is 10 seconds.
+
+## ASIO Status
+
+The tuning OSD reports ASIO setup failures instead of silently accepting tuning commands that cannot be processed.
+
+`ASIO: waiting for audio` is a normal transient startup state and does not replace the selected tuning display.
+
+If the OSD reports an error:
+
+- `ASIO hook failed` — RL-Mods could not install its RS_ASIO interception.
+- `ASIO: buffer setup failed` — the ASIO driver failed while creating or recreating its buffers.
+- `ASIO: no input channel bound` — check the `Channel=` value in the relevant `[Asio.Input.N]` section of `RS_ASIO.ini`.
+- `ASIO: unsupported input format` — the bound input is not using the supported 32-bit integer ASIO sample format.
+- `ASIO: duplicate input Channel` — both player inputs are configured to the same ASIO channel.
+
+RL-Mods matches `RS_ASIO.ini` `Channel=` directly to the driver's ASIO channel number.
+
+## Audio Latency
+
+At E Standard / A440, RL-Mods uses a true dry path and adds no DSP latency.
+
+When pitch shifting is active, the pitch shifter adds 768 samples of processing latency — approximately 16 ms at 48 kHz — in addition to the normal interface and Rocksmith audio latency.
+
+Tuning changes that cross the neutral E Standard / A440 boundary use a short output duck so the zero-latency dry path and delayed shifted path can switch without an audible hard cut or dry/wet comb filtering.
 
 ## Status
 
@@ -88,6 +117,8 @@ Pitch shifting may introduce subtle processing artifacts depending on the signal
 ## Design
 
 RL-Mods intentionally stays small and focused. It uses a minimal XInput proxy, intercepts the RS_ASIO driver path for tuning, and implements only the Rocksmith memory interactions needed by its features.
+
+The audio callback performs bounded processing on preallocated buffers. UI polling, hotkeys, menu reads, and overlays run on RL-Mods' worker thread rather than the ASIO callback thread.
 
 The goal is practical functionality with as little interference with Rocksmith as possible.
 
