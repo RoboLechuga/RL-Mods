@@ -134,4 +134,4 @@ In particular:
 
 RL-Mods' integration code, ASIO interception, multiplayer handling, tuning controls, OSD, screenshot controls, and enumeration implementation are original to this project.
 
-See `THIRD_PARTY-NOTICES.txt` for third-party licensing details.
+RL-Mods is open source under the MIT License. See `LICENSE` and `THIRD_PARTY-NOTICES.txt`.
