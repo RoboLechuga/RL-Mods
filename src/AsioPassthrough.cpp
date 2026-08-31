@@ -450,26 +450,18 @@ namespace AsioPassthrough
                     : nullptr;
             }
 
-            const ASIOError result =
-                originalCreateBuffers(
-                    self,
-                    unused,
-                    infos,
-                    numChannels,
-                    bufferSize,
-                    callbacks
-                        ? &hookedCallbacks
-                        : nullptr);
-
-            if (result != ASE_OK)
-                return result;
-
+            // Disarm the previous buffer set before asking the driver to
+            // recreate anything. A failed or in-progress recreate must never
+            // leave stale ASIO buffer pointers eligible for processing.
             processingReady.store(
                 false,
                 std::memory_order_release);
 
-            activeBufferFrames =
-                bufferSize;
+            status.store(
+                Status::WaitingForBuffers,
+                std::memory_order_release);
+
+            activeBufferFrames = 0;
 
             for (int player = 0;
                  player < MAX_PLAYERS;
@@ -487,6 +479,29 @@ namespace AsioPassthrough
                 playerInputs[player]
                     .active = false;
             }
+
+            const ASIOError result =
+                originalCreateBuffers(
+                    self,
+                    unused,
+                    infos,
+                    numChannels,
+                    bufferSize,
+                    callbacks
+                        ? &hookedCallbacks
+                        : nullptr);
+
+            if (result != ASE_OK)
+            {
+                status.store(
+                    Status::BufferSetupFailed,
+                    std::memory_order_release);
+
+                return result;
+            }
+
+            activeBufferFrames =
+                bufferSize;
 
             const bool duplicateChannel =
                 playerInputs[0].inputChannel >= 0 &&
@@ -836,6 +851,9 @@ namespace AsioPassthrough
 
         case Status::WaitingForBuffers:
             return "ASIO: waiting for audio";
+
+        case Status::BufferSetupFailed:
+            return "ASIO: buffer setup failed";
 
         case Status::NoChannelsBound:
             return "ASIO: no input channel bound";

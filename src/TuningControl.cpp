@@ -90,7 +90,9 @@ namespace TuningControl
                 AsioPassthrough::GetStatus();
 
             if (asioStatus !=
-                    AsioPassthrough::Status::Ready)
+                    AsioPassthrough::Status::Ready &&
+                asioStatus !=
+                    AsioPassthrough::Status::WaitingForBuffers)
             {
                 return
                     AsioPassthrough::GetStatusText();

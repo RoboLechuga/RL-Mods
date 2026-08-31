@@ -6,6 +6,7 @@ namespace AsioPassthrough
     {
         NotInstalled,
         WaitingForBuffers,
+        BufferSetupFailed,
         NoChannelsBound,
         UnsupportedFormat,
         DuplicateChannel,
