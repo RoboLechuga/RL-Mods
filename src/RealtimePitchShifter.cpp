@@ -80,16 +80,32 @@ namespace Audio
         if (referenceHz < 1)
             referenceHz = DEFAULT_REFERENCE_HZ;
 
-        targetRatio.store(
+        SetRatio(
             RatioForTuning(
                 semitones,
-                referenceHz),
+                referenceHz));
+    }
+
+    void RealtimePitchShifter::SetRatio(
+        float ratio)
+    {
+        if (!std::isfinite(ratio))
+            ratio = 1.0f;
+
+        ratio =
+            std::clamp(
+                ratio,
+                MIN_RATIO,
+                MAX_RATIO);
+
+        targetRatio.store(
+            ratio,
             std::memory_order_relaxed);
 
         neutral.store(
-            semitones == 0 &&
-            referenceHz ==
-                DEFAULT_REFERENCE_HZ,
+            std::fabs(
+                ratio - 1.0f) <
+                0.000001f,
             std::memory_order_relaxed);
     }
 

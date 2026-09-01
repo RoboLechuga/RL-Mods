@@ -102,6 +102,7 @@ namespace AsioPassthrough
 
         std::atomic<bool> installed{ false };
         std::atomic<bool> processingReady{ false };
+        std::atomic<bool> playerReady[MAX_PLAYERS]{};
         std::atomic<Status> status{ Status::NotInstalled };
 
         void* PatchVTableSlot(
@@ -478,6 +479,10 @@ namespace AsioPassthrough
 
                 playerInputs[player]
                     .active = false;
+
+                playerReady[player].store(
+                    false,
+                    std::memory_order_release);
             }
 
             const ASIOError result =
@@ -641,6 +646,10 @@ namespace AsioPassthrough
 
                     input.shifter.Prepare(
                         playerFormat);
+
+                    playerReady[player].store(
+                        true,
+                        std::memory_order_release);
 
                     anyReady = true;
                 }
@@ -823,11 +832,57 @@ namespace AsioPassthrough
              player < MAX_PLAYERS;
              ++player)
         {
-            playerInputs[player]
-                .shifter.SetTuning(
-                    semitones,
-                    referenceHz);
+            SetPlayerTuning(
+                player,
+                semitones,
+                referenceHz);
         }
+    }
+
+    void SetPlayerTuning(
+        int player,
+        int semitones,
+        int referenceHz)
+    {
+        if (player < 0 ||
+            player >= MAX_PLAYERS)
+        {
+            return;
+        }
+
+        playerInputs[player]
+            .shifter.SetTuning(
+                semitones,
+                referenceHz);
+    }
+
+    void SetPlayerRatio(
+        int player,
+        float ratio)
+    {
+        if (player < 0 ||
+            player >= MAX_PLAYERS)
+        {
+            return;
+        }
+
+        playerInputs[player]
+            .shifter.SetRatio(
+                ratio);
+    }
+
+    bool IsPlayerReady(
+        int player)
+    {
+        if (player < 0 ||
+            player >= MAX_PLAYERS)
+        {
+            return false;
+        }
+
+        return
+            playerReady[player].load(
+                std::memory_order_acquire);
     }
 
     bool IsInstalled()

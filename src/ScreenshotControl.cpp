@@ -26,7 +26,7 @@ namespace ScreenshotControl
         constexpr const wchar_t* INI_KEY_DELAY = L"DelayMs";
         constexpr const wchar_t* INI_KEY_DEBUG = L"Debug";
 
-        constexpr const char* VERSION_TEXT = "RL-Mods 1.2";
+        constexpr const char* VERSION_TEXT = "RL-Mods 1.3-test";
 
         bool g_enabled = true;
         bool g_debug = false;
@@ -419,6 +419,8 @@ namespace ScreenshotControl
                     "F5        Auto Screenshot ON/OFF\n"
                     "F6 / F7   Screenshot delay -1s / +1s\n"
                     "F8        Refresh song enumeration\n"
+                    "F9        Tuning mode: P1 / P2 / Sync / Auto\n"
+                    "F10       Confirm current guitar tuning\n"
                     "\n"
                     "\"If it sounds bad, that's probably still you.\"\n"
                     "%s",
