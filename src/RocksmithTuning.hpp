@@ -20,8 +20,10 @@ namespace RocksmithTuning
         }
     };
 
-    // Reads Rocksmith's currently loaded arrangement tuning.
-    // The values are authored semitone offsets for E A D G B E.
+    // Reads Rocksmith's current target tuning. In a pre-song tuner this uses
+    // the displayed tuner tuning; once gameplay is loaded it uses the current
+    // arrangement's six authored string offsets. Both September-2022 and
+    // December-2024 executable pointer roots are supported.
     bool TryReadArrangement(Tuning& tuning);
 
     // Reads the currently authored true/reference tuning.
