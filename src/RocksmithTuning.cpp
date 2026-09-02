@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <iomanip>
+#include <sstream>
 #include <string>
 
 namespace RocksmithTuning
@@ -28,8 +30,8 @@ namespace RocksmithTuning
 
         // Rocksmith memory-layout facts for the two versions currently tracked by
         // RSMods: Remastered September 2022 and Learn & Play December 2024.
-        // The 2024 build uses relocated module-base roots; the 2022 build
-        // uses the fixed roots below.
+        // Tuning / tuner-text / true-tuning roots are module-relative RVAs in
+        // both builds. Current-menu is the exception: the 2022 value is absolute.
         constexpr std::uintptr_t ARRANGEMENT_2024_ROOT_OFFSET =
             0x00F6062C;
         constexpr std::uintptr_t ARRANGEMENT_2022_ROOT =
@@ -203,6 +205,42 @@ namespace RocksmithTuning
                 L"RLMods.ini";
         }
 
+        std::wstring BuildGamePath(
+            const wchar_t* fileName)
+        {
+            wchar_t path[MAX_PATH] = {};
+
+            const DWORD length =
+                GetModuleFileNameW(
+                    nullptr,
+                    path,
+                    MAX_PATH);
+
+            if (length == 0 ||
+                length >= MAX_PATH)
+            {
+                return fileName;
+            }
+
+            std::wstring fullPath(path);
+
+            const size_t slash =
+                fullPath.find_last_of(
+                    L"\\/");
+
+            if (slash ==
+                std::wstring::npos)
+            {
+                return fileName;
+            }
+
+            return
+                fullPath.substr(
+                    0,
+                    slash + 1) +
+                fileName;
+        }
+
         ExecutableVersion ReadExecutableVersion()
         {
             wchar_t version[32] = {};
@@ -362,35 +400,32 @@ namespace RocksmithTuning
         template <size_t N>
         std::uintptr_t ResolveConfigured(
             std::uintptr_t root2024Offset,
-            std::uintptr_t root2022,
+            std::uintptr_t root2022Offset,
             const std::array<
                 std::uintptr_t,
                 N>& offsets)
         {
-            if (GetExecutableVersion() ==
-                ExecutableVersion::
-                    LearnAndPlay2024)
-            {
-                HMODULE gameModule =
-                    GetModuleHandleW(nullptr);
+            HMODULE gameModule =
+                GetModuleHandleW(nullptr);
 
-                if (!gameModule)
-                    return 0;
+            if (!gameModule)
+                return 0;
 
-                const std::uintptr_t base =
-                    reinterpret_cast<std::uintptr_t>(
-                        gameModule);
+            const std::uintptr_t base =
+                reinterpret_cast<std::uintptr_t>(
+                    gameModule);
 
-                return
-                    ResolvePointerChain(
-                        base +
-                            root2024Offset,
-                        offsets);
-            }
+            const std::uintptr_t rootOffset =
+                GetExecutableVersion() ==
+                    ExecutableVersion::
+                        LearnAndPlay2024
+                ? root2024Offset
+                : root2022Offset;
 
             return
                 ResolvePointerChain(
-                    root2022,
+                    base +
+                        rootOffset,
                     offsets);
         }
 
@@ -441,6 +476,275 @@ namespace RocksmithTuning
             }
 
             return result;
+        }
+
+        std::string AddressText(
+            std::uintptr_t address)
+        {
+            std::ostringstream text;
+
+            text << "0x"
+                 << std::uppercase
+                 << std::hex
+                 << std::setw(
+                        static_cast<int>(
+                            sizeof(std::uintptr_t) * 2))
+                 << std::setfill('0')
+                 << address;
+
+            return text.str();
+        }
+
+        template <size_t N>
+        std::uintptr_t TracePointerChain(
+            std::ostringstream& log,
+            const char* label,
+            std::uintptr_t root,
+            const std::array<
+                std::uintptr_t,
+                N>& offsets)
+        {
+            log << label << "\n";
+            log << "  root: "
+                << AddressText(root)
+                << "\n";
+
+            std::uintptr_t address = root;
+
+            for (size_t i = 0;
+                 i < offsets.size();
+                 ++i)
+            {
+                log << "  step "
+                    << i
+                    << ": read "
+                    << AddressText(address);
+
+                std::uintptr_t next = 0;
+
+                if (!TryReadValue(
+                        address,
+                        next))
+                {
+                    log << " -> UNREADABLE\n";
+                    return 0;
+                }
+
+                log << " -> "
+                    << AddressText(next);
+
+                if (next == 0)
+                {
+                    log << " -> NULL\n";
+                    return 0;
+                }
+
+                if (next >
+                    UINTPTR_MAX -
+                    offsets[i])
+                {
+                    log << " -> OVERFLOW\n";
+                    return 0;
+                }
+
+                address =
+                    next +
+                    offsets[i];
+
+                log << " + "
+                    << AddressText(
+                        offsets[i])
+                    << " = "
+                    << AddressText(address)
+                    << "\n";
+            }
+
+            log << "  final: "
+                << AddressText(address)
+                << "\n";
+
+            return address;
+        }
+
+        void TraceRawBytes(
+            std::ostringstream& log,
+            std::uintptr_t address,
+            size_t bytes)
+        {
+            log << "  raw: ";
+
+            for (size_t i = 0;
+                 i < bytes;
+                 ++i)
+            {
+                std::uint8_t value = 0;
+
+                if (!TryReadValue(
+                        address + i,
+                        value))
+                {
+                    log << "<unreadable at +0x"
+                        << std::hex
+                        << std::uppercase
+                        << i
+                        << std::dec
+                        << ">";
+                    break;
+                }
+
+                if (i != 0)
+                    log << ' ';
+
+                log << std::uppercase
+                    << std::hex
+                    << std::setw(2)
+                    << std::setfill('0')
+                    << static_cast<int>(value)
+                    << std::dec;
+            }
+
+            log << "\n";
+        }
+
+        template <size_t N>
+        void TraceStringPointer(
+            std::ostringstream& log,
+            const char* label,
+            std::uintptr_t root,
+            const std::array<
+                std::uintptr_t,
+                N>& offsets)
+        {
+            const std::uintptr_t address =
+                TracePointerChain(
+                    log,
+                    label,
+                    root,
+                    offsets);
+
+            if (!address)
+            {
+                log << "  result: FAILED\n\n";
+                return;
+            }
+
+            TraceRawBytes(
+                log,
+                address,
+                32);
+
+            const std::string text =
+                ReadString(
+                    address,
+                    128);
+
+            log << "  text: "
+                << (text.empty()
+                    ? "<empty/unreadable>"
+                    : text)
+                << "\n\n";
+        }
+
+        template <size_t N>
+        void TraceArrangementPointer(
+            std::ostringstream& log,
+            const char* label,
+            std::uintptr_t root,
+            const std::array<
+                std::uintptr_t,
+                N>& offsets)
+        {
+            const std::uintptr_t address =
+                TracePointerChain(
+                    log,
+                    label,
+                    root,
+                    offsets);
+
+            if (!address)
+            {
+                log << "  result: FAILED\n\n";
+                return;
+            }
+
+            TraceRawBytes(
+                log,
+                address,
+                16);
+
+            log << "  strings raw/signed: ";
+
+            for (size_t i = 0;
+                 i < STRING_BYTE_OFFSETS.size();
+                 ++i)
+            {
+                std::uint8_t raw = 0;
+
+                if (!TryReadValue(
+                        address +
+                            STRING_BYTE_OFFSETS[i],
+                        raw))
+                {
+                    log << "<unreadable>";
+                    break;
+                }
+
+                const int value =
+                    static_cast<int>(
+                        static_cast<std::int8_t>(
+                            raw));
+
+                if (i != 0)
+                    log << ", ";
+
+                log << static_cast<int>(raw)
+                    << '/'
+                    << value;
+            }
+
+            log << "\n\n";
+        }
+
+        template <size_t N>
+        void TraceFloatPointer(
+            std::ostringstream& log,
+            const char* label,
+            std::uintptr_t root,
+            const std::array<
+                std::uintptr_t,
+                N>& offsets)
+        {
+            const std::uintptr_t address =
+                TracePointerChain(
+                    log,
+                    label,
+                    root,
+                    offsets);
+
+            if (!address)
+            {
+                log << "  result: FAILED\n\n";
+                return;
+            }
+
+            float value = 0.0f;
+
+            if (!TryReadValue(
+                    address,
+                    value))
+            {
+                log << "  float: UNREADABLE\n\n";
+                return;
+            }
+
+            TraceRawBytes(
+                log,
+                address,
+                sizeof(float));
+
+            log << "  float: "
+                << value
+                << "\n\n";
         }
 
         void ReplaceAll(
@@ -828,6 +1132,175 @@ namespace RocksmithTuning
 
             return names[pitchClass];
         }
+    }
+
+    bool CaptureDebugSnapshot()
+    {
+        HMODULE gameModule =
+            GetModuleHandleW(nullptr);
+
+        if (!gameModule)
+            return false;
+
+        const std::uintptr_t base =
+            reinterpret_cast<std::uintptr_t>(
+                gameModule);
+
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+
+        std::ostringstream log;
+
+        log << "============================================================\n";
+        log << "RL-Mods tuning debug capture\n";
+        log << std::setfill('0')
+            << std::dec
+            << now.wYear << '-'
+            << std::setw(2) << now.wMonth << '-'
+            << std::setw(2) << now.wDay << ' '
+            << std::setw(2) << now.wHour << ':'
+            << std::setw(2) << now.wMinute << ':'
+            << std::setw(2) << now.wSecond
+            << "\n";
+        log << "Configured version: "
+            << (GetExecutableVersion() ==
+                    ExecutableVersion::LearnAndPlay2024
+                ? "2024"
+                : "2022")
+            << "\n";
+        log << "Rocksmith module base: "
+            << AddressText(base)
+            << "\n\n";
+
+        TraceStringPointer(
+            log,
+            "CURRENT MENU - 2022 absolute root",
+            CURRENT_MENU_2022_ROOT,
+            CURRENT_MENU_OFFSETS);
+
+        TraceStringPointer(
+            log,
+            "CURRENT MENU - 2024 module-relative root",
+            base +
+                CURRENT_MENU_2024_ROOT_OFFSET,
+            CURRENT_MENU_OFFSETS);
+
+        TraceStringPointer(
+            log,
+            "TUNER TEXT - 2022 module-relative root",
+            base +
+                TUNER_TEXT_2022_ROOT,
+            TUNER_TEXT_OFFSETS);
+
+        TraceStringPointer(
+            log,
+            "TUNER TEXT - 2024 module-relative root",
+            base +
+                TUNER_TEXT_2024_ROOT_OFFSET,
+            TUNER_TEXT_OFFSETS);
+
+        TraceArrangementPointer(
+            log,
+            "ARRANGEMENT - 2022 module-relative root",
+            base +
+                ARRANGEMENT_2022_ROOT,
+            ARRANGEMENT_OFFSETS);
+
+        TraceArrangementPointer(
+            log,
+            "ARRANGEMENT - 2024 module-relative root",
+            base +
+                ARRANGEMENT_2024_ROOT_OFFSET,
+            ARRANGEMENT_OFFSETS);
+
+        TraceFloatPointer(
+            log,
+            "TRUE TUNING - 2022 module-relative root",
+            base +
+                TRUE_TUNING_2022_ROOT,
+            TRUE_TUNING_OFFSETS);
+
+        TraceFloatPointer(
+            log,
+            "TRUE TUNING - 2024 module-relative root",
+            base +
+                TRUE_TUNING_2024_ROOT_OFFSET,
+            TRUE_TUNING_OFFSETS);
+
+        log << "NORMAL RL-MODS READERS\n";
+        log << "  CurrentMenu(): ";
+
+        const std::string menu =
+            CurrentMenu();
+
+        log << (menu.empty()
+                ? "<empty/unresolved>"
+                : menu)
+            << "\n";
+
+        Tuning arrangement{};
+
+        if (TryReadArrangement(
+                arrangement))
+        {
+            log << "  TryReadArrangement(): "
+                << VectorText(
+                    arrangement)
+                << " / "
+                << Name(
+                    arrangement)
+                << "\n";
+        }
+        else
+        {
+            log << "  TryReadArrangement(): FAILED\n";
+        }
+
+        int referenceHz = 0;
+
+        if (TryReadReferenceHz(
+                referenceHz))
+        {
+            log << "  TryReadReferenceHz(): A"
+                << referenceHz
+                << "\n";
+        }
+        else
+        {
+            log << "  TryReadReferenceHz(): FAILED\n";
+        }
+
+        log << "============================================================\n\n";
+
+        const std::wstring debugPath =
+            BuildGamePath(
+                L"RLMods_tuning_debug.txt");
+
+        FILE* file = nullptr;
+
+        if (_wfopen_s(
+                &file,
+                debugPath.c_str(),
+                L"ab") != 0 ||
+            !file)
+        {
+            return false;
+        }
+
+        const std::string output =
+            log.str();
+
+        const size_t written =
+            fwrite(
+                output.data(),
+                1,
+                output.size(),
+                file);
+
+        fclose(file);
+
+        return written ==
+            output.size();
     }
 
     bool TryReadArrangement(
