@@ -14,6 +14,18 @@ namespace RocksmithTuning
 {
     namespace
     {
+        enum class ExecutableVersion
+        {
+            Remastered2022,
+            LearnAndPlay2024
+        };
+
+        constexpr const wchar_t* INI_SECTION_ROCKSMITH =
+            L"Rocksmith";
+
+        constexpr const wchar_t* INI_KEY_VERSION =
+            L"Version";
+
         // Rocksmith memory-layout facts for the two versions currently tracked by
         // RSMods: Remastered September 2022 and Learn & Play December 2024.
         // The 2024 build uses relocated module-base roots; the 2022 build
@@ -156,6 +168,78 @@ namespace RocksmithTuning
             "PreGame_GETuner"
         };
 
+        std::wstring BuildIniPath()
+        {
+            wchar_t path[MAX_PATH] = {};
+
+            const DWORD length =
+                GetModuleFileNameW(
+                    nullptr,
+                    path,
+                    MAX_PATH);
+
+            if (length == 0 ||
+                length >= MAX_PATH)
+            {
+                return L"RLMods.ini";
+            }
+
+            std::wstring fullPath(path);
+
+            const size_t slash =
+                fullPath.find_last_of(
+                    L"\\/");
+
+            if (slash ==
+                std::wstring::npos)
+            {
+                return L"RLMods.ini";
+            }
+
+            return
+                fullPath.substr(
+                    0,
+                    slash + 1) +
+                L"RLMods.ini";
+        }
+
+        ExecutableVersion ReadExecutableVersion()
+        {
+            wchar_t version[32] = {};
+
+            const std::wstring iniPath =
+                BuildIniPath();
+
+            GetPrivateProfileStringW(
+                INI_SECTION_ROCKSMITH,
+                INI_KEY_VERSION,
+                L"2022",
+                version,
+                ARRAYSIZE(version),
+                iniPath.c_str());
+
+            if (lstrcmpW(
+                    version,
+                    L"2024") == 0)
+            {
+                return
+                    ExecutableVersion::
+                        LearnAndPlay2024;
+            }
+
+            return
+                ExecutableVersion::
+                    Remastered2022;
+        }
+
+        ExecutableVersion GetExecutableVersion()
+        {
+            static const ExecutableVersion version =
+                ReadExecutableVersion();
+
+            return version;
+        }
+
         bool IsReadableRange(
             const void* address,
             size_t bytes)
@@ -276,29 +360,32 @@ namespace RocksmithTuning
         }
 
         template <size_t N>
-        std::uintptr_t Resolve2024Then2022(
+        std::uintptr_t ResolveConfigured(
             std::uintptr_t root2024Offset,
             std::uintptr_t root2022,
             const std::array<
                 std::uintptr_t,
                 N>& offsets)
         {
-            HMODULE gameModule =
-                GetModuleHandleW(nullptr);
-
-            if (gameModule)
+            if (GetExecutableVersion() ==
+                ExecutableVersion::
+                    LearnAndPlay2024)
             {
+                HMODULE gameModule =
+                    GetModuleHandleW(nullptr);
+
+                if (!gameModule)
+                    return 0;
+
                 const std::uintptr_t base =
                     reinterpret_cast<std::uintptr_t>(
                         gameModule);
 
-                const std::uintptr_t resolved2024 =
+                return
                     ResolvePointerChain(
-                        base + root2024Offset,
+                        base +
+                            root2024Offset,
                         offsets);
-
-                if (resolved2024)
-                    return resolved2024;
             }
 
             return
@@ -590,37 +677,39 @@ namespace RocksmithTuning
 
         std::string CurrentMenu()
         {
-            HMODULE gameModule =
-                GetModuleHandleW(nullptr);
-
-            if (gameModule)
+            if (GetExecutableVersion() ==
+                ExecutableVersion::
+                    LearnAndPlay2024)
             {
+                HMODULE gameModule =
+                    GetModuleHandleW(nullptr);
+
+                if (!gameModule)
+                    return {};
+
                 const std::uintptr_t base =
                     reinterpret_cast<std::uintptr_t>(
                         gameModule);
 
-                const std::uintptr_t resolved2024 =
+                const std::uintptr_t resolved =
                     ResolvePointerChain(
                         base +
                             CURRENT_MENU_2024_ROOT_OFFSET,
                         CURRENT_MENU_OFFSETS);
 
-                const std::string text2024 =
+                return
                     ReadString(
-                        resolved2024);
-
-                if (!text2024.empty())
-                    return text2024;
+                        resolved);
             }
 
-            const std::uintptr_t resolved2022 =
+            const std::uintptr_t resolved =
                 ResolvePointerChain(
                     CURRENT_MENU_2022_ROOT,
                     CURRENT_MENU_OFFSETS);
 
             return
                 ReadString(
-                    resolved2022);
+                    resolved);
         }
 
         bool IsPreSongTunerMenu(
@@ -643,7 +732,7 @@ namespace RocksmithTuning
             Tuning& tuning)
         {
             const std::uintptr_t address =
-                Resolve2024Then2022(
+                ResolveConfigured(
                     TUNER_TEXT_2024_ROOT_OFFSET,
                     TUNER_TEXT_2022_ROOT,
                     TUNER_TEXT_OFFSETS);
@@ -669,7 +758,7 @@ namespace RocksmithTuning
             Tuning& tuning)
         {
             const std::uintptr_t address =
-                Resolve2024Then2022(
+                ResolveConfigured(
                     ARRANGEMENT_2024_ROOT_OFFSET,
                     ARRANGEMENT_2022_ROOT,
                     ARRANGEMENT_OFFSETS);
@@ -782,7 +871,7 @@ namespace RocksmithTuning
         int& referenceHz)
     {
         const std::uintptr_t address =
-            Resolve2024Then2022(
+            ResolveConfigured(
                 TRUE_TUNING_2024_ROOT_OFFSET,
                 TRUE_TUNING_2022_ROOT,
                 TRUE_TUNING_OFFSETS);
