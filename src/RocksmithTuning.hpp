@@ -20,6 +20,11 @@ namespace RocksmithTuning
         }
     };
 
+    // Temporary F10 diagnostics for the v1.3 auto-tune investigation.
+    // Appends both 2022 and 2024 pointer-chain results to
+    // RLMods_tuning_debug.txt in the Rocksmith directory.
+    bool CaptureDebugSnapshot();
+
     // Reads Rocksmith's current target tuning. In a pre-song tuner this uses
     // the displayed tuner tuning; once gameplay is loaded it uses the current
     // arrangement's six authored string offsets. Both September-2022 and
