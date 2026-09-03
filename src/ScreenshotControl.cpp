@@ -474,7 +474,7 @@ namespace ScreenshotControl
             return 470;
         }
 
-        int MeasureMeasureOverlayHeight()
+        int MeasureOverlayHeight()
         {
             const int width =
                 OverlayWidth();
