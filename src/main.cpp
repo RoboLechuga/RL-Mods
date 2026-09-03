@@ -1,7 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include "AsioPassthrough.hpp"
 #include "TuningControl.hpp"
-#include "RocksmithTuning.hpp"
 #include "ScreenshotControl.hpp"
 #include <windows.h>
 #include <Xinput.h>
@@ -272,12 +271,6 @@ namespace
         {
             if (KeyPressedInRocksmith(VK_F8))
                 ForceEnumeration();
-
-            // Temporary v1.3 tuning diagnostics. This consumes F10 before
-            // TuningControl::Poll(), so the normal F10 baseline-confirm action
-            // does not run while we are capturing the memory state.
-            if (KeyPressedInRocksmith(VK_F10))
-                RocksmithTuning::CaptureDebugSnapshot();
 
             ScreenshotControl::Poll();
             TuningControl::Poll();

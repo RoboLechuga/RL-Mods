@@ -1134,6 +1134,39 @@ namespace RocksmithTuning
         }
     }
 
+    std::string CurrentMenuName()
+    {
+        return CurrentMenu();
+    }
+
+    bool IsPreSongTuner(
+        const std::string& menu)
+    {
+        return IsPreSongTunerMenu(menu);
+    }
+
+    bool IsSongGameplayMenu(
+        const std::string& menu)
+    {
+        constexpr const char* GAME_SUFFIX = "_Game";
+        constexpr size_t GAME_SUFFIX_LENGTH = 5;
+
+        return
+            menu.size() >= GAME_SUFFIX_LENGTH &&
+            menu.compare(
+                menu.size() - GAME_SUFFIX_LENGTH,
+                GAME_SUFFIX_LENGTH,
+                GAME_SUFFIX) == 0;
+    }
+
+    bool TryReadTunerTarget(
+        Tuning& tuning)
+    {
+        return
+            TryReadTunerTextTuning(
+                tuning);
+    }
+
     bool CaptureDebugSnapshot()
     {
         HMODULE gameModule =

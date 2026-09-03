@@ -20,15 +20,23 @@ namespace RocksmithTuning
         }
     };
 
-    // Temporary F10 diagnostics for the v1.3 auto-tune investigation.
-    // Appends both 2022 and 2024 pointer-chain results to
-    // RLMods_tuning_debug.txt in the Rocksmith directory.
-    bool CaptureDebugSnapshot();
+    // Current Rocksmith menu name from the configured executable layout.
+    std::string CurrentMenuName();
 
-    // Reads Rocksmith's current target tuning. In a pre-song tuner this uses
-    // the displayed tuner tuning; once gameplay is loaded it uses the current
-    // arrangement's six authored string offsets. Both September-2022 and
-    // December-2024 executable pointer roots are supported.
+    // True for the pre-song tuner menus used by Learn a Song, Nonstop Play,
+    // Score Attack, Session Mode, Duet/H2H, and the pre-game tuner.
+    bool IsPreSongTuner(const std::string& menu);
+
+    // True for a gameplay menu. Used only to confirm that a pre-song tuner
+    // was successfully exited forward into the song.
+    bool IsSongGameplayMenu(const std::string& menu);
+
+    // Reads only the displayed pre-song tuner target text. Auto mode uses this
+    // source and latches the result; it does not continuously recalculate from
+    // the in-song arrangement pointer.
+    bool TryReadTunerTarget(Tuning& tuning);
+
+    // Legacy/general target reader retained for diagnostics and other callers.
     bool TryReadArrangement(Tuning& tuning);
 
     // Reads the currently authored true/reference tuning.
