@@ -662,49 +662,78 @@ namespace TuningControl
             return text;
         }
 
-        int OverlayLineCount()
-        {
-            const std::string text =
-                CurrentText();
-
-            int lines = 1;
-
-            for (char c : text)
-            {
-                if (c == '\n')
-                    ++lines;
-            }
-
-            return lines;
-        }
-
-        int OverlayHeight()
-        {
-            int height =
-                24 +
-                OverlayLineCount() * 27;
-
-            if (height < 118)
-                height = 118;
-
-            if (height > 420)
-                height = 420;
-
-            return height;
-        }
-
         int OverlayWidth()
         {
-            if (g_mode ==
-                ControlMode::Auto)
-            {
-                return 540;
-            }
-
             return
                 IsRocksmithMultiplayer()
                 ? 620
                 : 540;
+        }
+
+        int MeasureMeasureOverlayHeight()
+        {
+            const int width =
+                OverlayWidth();
+
+            const std::string text =
+                CurrentText();
+
+            HDC dc =
+                GetDC(nullptr);
+
+            if (!dc)
+                return 180;
+
+            HFONT previousFont =
+                nullptr;
+
+            if (g_font)
+            {
+                previousFont =
+                    reinterpret_cast<HFONT>(
+                        SelectObject(
+                            dc,
+                            g_font));
+            }
+
+            RECT rect{};
+            rect.left = 0;
+            rect.top = 0;
+            rect.right =
+                width - 36;
+            rect.bottom = 0;
+
+            DrawTextA(
+                dc,
+                text.c_str(),
+                -1,
+                &rect,
+                DT_LEFT |
+                DT_TOP |
+                DT_WORDBREAK |
+                DT_NOPREFIX |
+                DT_CALCRECT);
+
+            if (previousFont)
+            {
+                SelectObject(
+                    dc,
+                    previousFont);
+            }
+
+            ReleaseDC(
+                nullptr,
+                dc);
+
+            int height =
+                (rect.bottom -
+                    rect.top) +
+                20;
+
+            if (height < 96)
+                height = 96;
+
+            return height;
         }
 
         int OverlayX()
@@ -714,11 +743,7 @@ namespace TuningControl
 
         int OverlayY()
         {
-            return
-                g_mode ==
-                    ControlMode::Auto
-                ? 170
-                : 40;
+            return 40;
         }
 
         int ChooseAutoShift(
@@ -1366,7 +1391,7 @@ namespace TuningControl
                     OverlayX(),
                     OverlayY(),
                     OverlayWidth(),
-                    OverlayHeight(),
+                    MeasureOverlayHeight(),
                     nullptr,
                     nullptr,
                     instance,
@@ -1390,7 +1415,7 @@ namespace TuningControl
                 return;
 
             const int height =
-                OverlayHeight();
+                MeasureOverlayHeight();
 
             InvalidateRect(
                 g_overlay,

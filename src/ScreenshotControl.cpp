@@ -474,15 +474,70 @@ namespace ScreenshotControl
             return 470;
         }
 
-        int OverlayHeight()
+        int MeasureMeasureOverlayHeight()
         {
-            if (g_showHelp)
-                return 300;
+            const int width =
+                OverlayWidth();
 
-            if (g_debug)
-                return 118;
+            const std::string text =
+                OverlayText();
 
-            return 64;
+            HDC dc =
+                GetDC(nullptr);
+
+            if (!dc)
+                return 180;
+
+            HFONT previousFont =
+                nullptr;
+
+            if (g_font)
+            {
+                previousFont =
+                    reinterpret_cast<HFONT>(
+                        SelectObject(
+                            dc,
+                            g_font));
+            }
+
+            RECT rect{};
+            rect.left = 0;
+            rect.top = 0;
+            rect.right =
+                width - 36;
+            rect.bottom = 0;
+
+            DrawTextA(
+                dc,
+                text.c_str(),
+                -1,
+                &rect,
+                DT_LEFT |
+                DT_TOP |
+                DT_WORDBREAK |
+                DT_NOPREFIX |
+                DT_CALCRECT);
+
+            if (previousFont)
+            {
+                SelectObject(
+                    dc,
+                    previousFont);
+            }
+
+            ReleaseDC(
+                nullptr,
+                dc);
+
+            int height =
+                (rect.bottom -
+                    rect.top) +
+                20;
+
+            if (height < 64)
+                height = 64;
+
+            return height;
         }
 
         LRESULT CALLBACK OverlayProc(
@@ -644,7 +699,7 @@ namespace ScreenshotControl
                     40,
                     118,
                     OverlayWidth(),
-                    OverlayHeight(),
+                    MeasureOverlayHeight(),
                     nullptr,
                     nullptr,
                     instance,
@@ -679,7 +734,7 @@ namespace ScreenshotControl
                 40,
                 118,
                 OverlayWidth(),
-                OverlayHeight(),
+                MeasureOverlayHeight(),
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
 
