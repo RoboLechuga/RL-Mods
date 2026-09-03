@@ -670,7 +670,7 @@ namespace TuningControl
                 : 540;
         }
 
-        int MeasureMeasureOverlayHeight()
+        int MeasureOverlayHeight()
         {
             const int width =
                 OverlayWidth();
