@@ -441,10 +441,11 @@ namespace TuningControl
                  i < target.strings.size();
                  ++i)
             {
-                highest =
-                    std::max(
-                        highest,
-                        target.strings[i]);
+                if (target.strings[i] > highest)
+                {
+                    highest =
+                        target.strings[i];
+                }
             }
 
             return
