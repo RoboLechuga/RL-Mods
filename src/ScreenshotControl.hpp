@@ -2,8 +2,7 @@
 
 namespace ScreenshotControl
 {
-    // Automatic score screenshots are enabled by default.
-    // F9 toggles the feature on/off while Rocksmith is running.
+    // Automatic score screenshots and the F4 hotkey/help overlay.
     void Initialize();
     void Poll();
     void Shutdown();

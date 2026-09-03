@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
@@ -32,6 +33,22 @@ namespace TuningControl
 
         constexpr ULONGLONG AUTO_READ_INTERVAL_MS = 100;
         constexpr ULONGLONG AUTO_CANCEL_GRACE_MS = 3000;
+
+        // RSMods-verified Rocksmith multiplayer state.
+        constexpr std::uintptr_t MULTIPLAYER_2022_ROOT_OFFSET =
+            0x00F5F57C;
+        constexpr std::uintptr_t MULTIPLAYER_2024_ROOT_OFFSET =
+            0x00F6057C;
+
+        constexpr std::array<std::uintptr_t, 5>
+            MULTIPLAYER_OFFSETS =
+        {
+            0x24,
+            0x28,
+            0x14,
+            0x90,
+            0x0C
+        };
 
         enum class ControlMode
         {
@@ -126,6 +143,154 @@ namespace TuningControl
                 return false;
 
             return IsRocksmithForeground();
+        }
+
+        bool IsReadablePointer(
+            std::uintptr_t address)
+        {
+            if (!address)
+                return false;
+
+            MEMORY_BASIC_INFORMATION mbi{};
+
+            if (!VirtualQuery(
+                    reinterpret_cast<const void*>(
+                        address),
+                    &mbi,
+                    sizeof(mbi)))
+            {
+                return false;
+            }
+
+            if (mbi.State != MEM_COMMIT)
+                return false;
+
+            if (mbi.Protect & PAGE_GUARD)
+                return false;
+
+            if (mbi.Protect & PAGE_NOACCESS)
+                return false;
+
+            const DWORD readable =
+                PAGE_READONLY |
+                PAGE_READWRITE |
+                PAGE_WRITECOPY |
+                PAGE_EXECUTE_READ |
+                PAGE_EXECUTE_READWRITE |
+                PAGE_EXECUTE_WRITECOPY;
+
+            return
+                (mbi.Protect & readable) != 0;
+        }
+
+        std::wstring BuildIniPath()
+        {
+            wchar_t path[MAX_PATH] = {};
+
+            const DWORD length =
+                GetModuleFileNameW(
+                    nullptr,
+                    path,
+                    MAX_PATH);
+
+            if (length == 0 ||
+                length >= MAX_PATH)
+            {
+                return L"RLMods.ini";
+            }
+
+            std::wstring fullPath(path);
+
+            const size_t slash =
+                fullPath.find_last_of(
+                    L"\\/");
+
+            if (slash ==
+                std::wstring::npos)
+            {
+                return L"RLMods.ini";
+            }
+
+            return
+                fullPath.substr(
+                    0,
+                    slash + 1) +
+                L"RLMods.ini";
+        }
+
+        bool Is2024Executable()
+        {
+            static const bool is2024 =
+                []()
+                {
+                    wchar_t version[32] = {};
+
+                    const std::wstring iniPath =
+                        BuildIniPath();
+
+                    GetPrivateProfileStringW(
+                        L"Rocksmith",
+                        L"Version",
+                        L"2022",
+                        version,
+                        ARRAYSIZE(version),
+                        iniPath.c_str());
+
+                    return
+                        lstrcmpW(
+                            version,
+                            L"2024") == 0;
+                }();
+
+            return is2024;
+        }
+
+        bool IsRocksmithMultiplayer()
+        {
+            HMODULE gameModule =
+                GetModuleHandleW(nullptr);
+
+            if (!gameModule)
+                return false;
+
+            const std::uintptr_t base =
+                reinterpret_cast<std::uintptr_t>(
+                    gameModule);
+
+            const std::uintptr_t rootOffset =
+                Is2024Executable()
+                ? MULTIPLAYER_2024_ROOT_OFFSET
+                : MULTIPLAYER_2022_ROOT_OFFSET;
+
+            std::uintptr_t address =
+                base + rootOffset;
+
+            for (const std::uintptr_t offset :
+                 MULTIPLAYER_OFFSETS)
+            {
+                if (!IsReadablePointer(address))
+                    return false;
+
+                const std::uintptr_t next =
+                    *reinterpret_cast<
+                        const std::uintptr_t*>(
+                            address);
+
+                if (!next)
+                    return false;
+
+                address =
+                    next + offset;
+            }
+
+            if (!IsReadablePointer(address))
+                return false;
+
+            const int value =
+                *reinterpret_cast<const int*>(
+                    address);
+
+            return value != 0;
         }
 
         const char* ModeName()
@@ -315,6 +480,59 @@ namespace TuningControl
             return buffer;
         }
 
+        std::string AutoText(
+            bool multiplayer,
+            bool player2Ready)
+        {
+            const auto& state =
+                g_players[0];
+
+            std::string text =
+                "Mode: Auto\n"
+                "Guitar: ";
+
+            text +=
+                RocksmithTuning::Name(
+                    state.physical);
+
+            text += "\nTarget: ";
+            text += ShiftName(state);
+
+            text += "\nShift: ";
+            text +=
+                std::to_string(
+                    state.displayShift);
+
+            text +=
+                state.displayShift == -1 ||
+                state.displayShift == 1
+                ? " semitone"
+                : " semitones";
+
+            text += "\nReference: A";
+            text +=
+                std::to_string(
+                    state.displayReferenceHz);
+
+            if (multiplayer)
+            {
+                text += "\n\nP2: ";
+
+                if (!player2Ready)
+                {
+                    text +=
+                        "ASIO input is not ready";
+                }
+                else
+                {
+                    text +=
+                        "Auto target unavailable";
+                }
+            }
+
+            return text;
+        }
+
         std::string CurrentText()
         {
             const auto asioStatus =
@@ -329,73 +547,111 @@ namespace TuningControl
                     AsioPassthrough::GetStatusText();
             }
 
-            std::string text =
-                "Mode: ";
-
-            text += ModeName();
-            text += "\n";
-
             const bool player1Ready =
                 AsioPassthrough::IsPlayerReady(0);
 
             const bool player2Ready =
                 AsioPassthrough::IsPlayerReady(1);
 
-            if (g_mode ==
-                ControlMode::Player1)
-            {
-                text +=
-                    PlayerBlock(
-                        "P1",
-                        g_players[0]);
-            }
-            else if (g_mode ==
-                ControlMode::Player2)
-            {
-                text +=
-                    PlayerBlock(
-                        "P2",
-                        g_players[1]);
+            const bool multiplayer =
+                IsRocksmithMultiplayer();
 
-                if (!player2Ready)
-                {
-                    text +=
-                        "\nP2 ASIO input is not ready";
-                }
-            }
-            else if (player2Ready &&
-                     SameDisplayState(
-                         g_players[0],
-                         g_players[1]))
+            std::string text;
+
+            if (g_mode ==
+                ControlMode::Auto)
             {
-                text +=
-                    PlayerBlock(
-                        "P1/P2",
-                        g_players[0]);
+                text =
+                    AutoText(
+                        multiplayer,
+                        player2Ready);
             }
             else
             {
-                text +=
-                    PlayerBlock(
-                        "P1",
-                        g_players[0]);
+                text =
+                    "Mode: ";
 
-                if (player2Ready)
+                text += ModeName();
+                text += "\n";
+
+                if (g_mode ==
+                    ControlMode::Player1)
                 {
-                    text += "\n\n";
+                    text +=
+                        PlayerBlock(
+                            "P1",
+                            g_players[0]);
+                }
+                else if (g_mode ==
+                    ControlMode::Player2)
+                {
                     text +=
                         PlayerBlock(
                             "P2",
                             g_players[1]);
+
+                    if (!player2Ready)
+                    {
+                        text +=
+                            "\nP2 ASIO input is not ready";
+                    }
                 }
-                else if (!player1Ready)
+                else if (
+                    multiplayer &&
+                    player2Ready &&
+                    SameDisplayState(
+                        g_players[0],
+                        g_players[1]))
                 {
                     text +=
-                        "\nASIO input is not ready";
+                        PlayerBlock(
+                            "P1/P2",
+                            g_players[0]);
+                }
+                else
+                {
+                    text +=
+                        PlayerBlock(
+                            "P1",
+                            g_players[0]);
+
+                    if (multiplayer)
+                    {
+                        text += "\n\n";
+
+                        if (player2Ready)
+                        {
+                            text +=
+                                PlayerBlock(
+                                    "P2",
+                                    g_players[1]);
+                        }
+                        else
+                        {
+                            text +=
+                                "P2 ASIO input is not ready";
+                        }
+                    }
+                    else if (!player1Ready)
+                    {
+                        text +=
+                            "\nASIO input is not ready";
+                    }
                 }
             }
 
-            if (!g_notice.empty() &&
+            const bool duplicateAutoNotice =
+                g_mode ==
+                    ControlMode::Auto &&
+                (g_notice.rfind(
+                    "Auto target:",
+                    0) == 0 ||
+                 g_notice.rfind(
+                    "Auto locked:",
+                    0) == 0);
+
+            if (!duplicateAutoNotice &&
+                !g_notice.empty() &&
                 GetTickCount64() <
                     g_noticeUntil)
             {
@@ -406,7 +662,7 @@ namespace TuningControl
             return text;
         }
 
-        int OverlayHeight()
+        int OverlayLineCount()
         {
             const std::string text =
                 CurrentText();
@@ -419,11 +675,50 @@ namespace TuningControl
                     ++lines;
             }
 
+            return lines;
+        }
+
+        int OverlayHeight()
+        {
+            int height =
+                24 +
+                OverlayLineCount() * 27;
+
+            if (height < 118)
+                height = 118;
+
+            if (height > 420)
+                height = 420;
+
+            return height;
+        }
+
+        int OverlayWidth()
+        {
+            if (g_mode ==
+                ControlMode::Auto)
+            {
+                return 540;
+            }
+
             return
-                std::clamp(
-                    24 + lines * 27,
-                    96,
-                    280);
+                IsRocksmithMultiplayer()
+                ? 620
+                : 540;
+        }
+
+        int OverlayX()
+        {
+            return 40;
+        }
+
+        int OverlayY()
+        {
+            return
+                g_mode ==
+                    ControlMode::Auto
+                ? 170
+                : 40;
         }
 
         int ChooseAutoShift(
@@ -991,7 +1286,8 @@ namespace TuningControl
                     -1,
                     &textRect,
                     DT_LEFT |
-                    DT_VCENTER |
+                    DT_TOP |
+                    DT_WORDBREAK |
                     DT_NOPREFIX);
 
                 if (previousFont)
@@ -1067,9 +1363,9 @@ namespace TuningControl
                     className,
                     L"",
                     WS_POPUP,
-                    40,
-                    40,
-                    680,
+                    OverlayX(),
+                    OverlayY(),
+                    OverlayWidth(),
                     OverlayHeight(),
                     nullptr,
                     nullptr,
@@ -1104,9 +1400,9 @@ namespace TuningControl
             SetWindowPos(
                 g_overlay,
                 HWND_TOPMOST,
-                40,
-                40,
-                680,
+                OverlayX(),
+                OverlayY(),
+                OverlayWidth(),
                 height,
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
