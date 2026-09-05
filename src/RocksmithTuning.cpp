@@ -2488,6 +2488,8 @@ namespace RocksmithTuning
         constexpr LONG BUILDER_CAPTURE_SLOTS = 64;
         constexpr DWORD TRAP_FLAG = 0x100;
 
+        constexpr size_t BUILDER_STACK_DWORDS = 20;
+
         struct BuilderCapture
         {
             volatile LONG sequence = 0;
@@ -2495,6 +2497,16 @@ namespace RocksmithTuning
             LONG cents = 0;
             DWORD threadId = 0;
             ULONGLONG tick = 0;
+
+            std::uintptr_t eax = 0;
+            std::uintptr_t ebx = 0;
+            std::uintptr_t ecx = 0;
+            std::uintptr_t edx = 0;
+            std::uintptr_t edi = 0;
+            std::uintptr_t ebp = 0;
+            std::uintptr_t esp = 0;
+
+            std::array<std::uintptr_t, BUILDER_STACK_DWORDS> stack{};
         };
 
         BuilderCapture g_builderCaptures[BUILDER_CAPTURE_SLOTS]{};
@@ -2586,6 +2598,35 @@ namespace RocksmithTuning
                     GetCurrentThreadId();
                 capture.tick =
                     GetTickCount64();
+
+                capture.eax = context->Eax;
+                capture.ebx = context->Ebx;
+                capture.ecx = context->Ecx;
+                capture.edx = context->Edx;
+                capture.edi = context->Edi;
+                capture.ebp = context->Ebp;
+                capture.esp = context->Esp;
+
+                for (size_t i = 0;
+                     i < BUILDER_STACK_DWORDS;
+                     ++i)
+                {
+                    std::uintptr_t value = 0;
+
+                    __try
+                    {
+                        value =
+                            *reinterpret_cast<const std::uintptr_t*>(
+                                context->Esp +
+                                (i * sizeof(std::uintptr_t)));
+                    }
+                    __except(EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        value = 0;
+                    }
+
+                    capture.stack[i] = value;
+                }
 
                 MemoryBarrier();
                 InterlockedExchange(
@@ -2716,6 +2757,245 @@ namespace RocksmithTuning
 
             return true;
 #endif
+        }
+
+        bool LooksLikePointerValue(std::uintptr_t value)
+        {
+            if (value < 0x10000)
+                return false;
+
+            return IsReadableRange(
+                reinterpret_cast<const void*>(value),
+                sizeof(std::uintptr_t));
+        }
+
+        void AppendContextPointerPreview(
+            std::ostringstream& log,
+            const char* label,
+            std::uintptr_t value)
+        {
+            log << "    " << label << '=' << AddressText(value);
+
+            if (!LooksLikePointerValue(value))
+            {
+                log << "\n";
+                return;
+            }
+
+            std::uintptr_t first = 0;
+            TryReadValue(value, first);
+
+            log << "  readable first="
+                << AddressText(first);
+
+            const std::string directText =
+                ReadString(value, 96);
+
+            if (LooksLikeDiagnosticText(directText))
+            {
+                log << "  text=\""
+                    << directText
+                    << "\"";
+            }
+
+            log << "\n";
+        }
+
+        void AppendBuilderCallContext(
+            std::ostringstream& log,
+            LONG sequence,
+            const BuilderCapture& capture,
+            const char* ownerLabel)
+        {
+            log << "  context event "
+                << sequence
+                << "  "
+                << ownerLabel
+                << "  detection="
+                << AddressText(capture.detection)
+                << " cents=";
+
+            if (capture.cents == 0x7FFFFFFF)
+                log << "<unreadable>";
+            else
+                log << capture.cents;
+
+            log << "\n";
+
+            AppendContextPointerPreview(log, "EAX", capture.eax);
+            AppendContextPointerPreview(log, "EBX", capture.ebx);
+            AppendContextPointerPreview(log, "ECX", capture.ecx);
+            AppendContextPointerPreview(log, "EDX", capture.edx);
+            AppendContextPointerPreview(log, "ESI", capture.detection);
+            AppendContextPointerPreview(log, "EDI", capture.edi);
+            AppendContextPointerPreview(log, "EBP", capture.ebp);
+            AppendContextPointerPreview(log, "ESP", capture.esp);
+
+            log << "    stack dwords (ESP + offset)\n";
+
+            for (size_t i = 0;
+                 i < capture.stack.size();
+                 ++i)
+            {
+                const std::uintptr_t value =
+                    capture.stack[i];
+
+                char label[32] = {};
+                sprintf_s(
+                    label,
+                    "[+0x%02X]",
+                    static_cast<unsigned int>(
+                        i * sizeof(std::uintptr_t)));
+
+                AppendContextPointerPreview(
+                    log,
+                    label,
+                    value);
+            }
+
+            log << "\n";
+        }
+
+        void TraceContextCandidatePair(
+            std::ostringstream& log,
+            const char* label,
+            std::uintptr_t player1,
+            std::uintptr_t player2)
+        {
+            if (!LooksLikePointerValue(player1) ||
+                !LooksLikePointerValue(player2) ||
+                player1 == player2)
+            {
+                return;
+            }
+
+            log << "  candidate pair "
+                << label
+                << ": P1="
+                << AddressText(player1)
+                << " P2="
+                << AddressText(player2)
+                << "\n";
+
+            TraceDetectionPairTuningDifferences(
+                log,
+                player1,
+                player2);
+        }
+
+        void AppendBuilderContextComparison(
+            std::ostringstream& log,
+            LONG firstSequence,
+            LONG total,
+            std::uintptr_t currentPlayer1)
+        {
+            const BuilderCapture* player1Capture = nullptr;
+            const BuilderCapture* player2Capture = nullptr;
+            LONG player1Sequence = 0;
+            LONG player2Sequence = 0;
+
+            for (LONG sequence = firstSequence;
+                 sequence <= total;
+                 ++sequence)
+            {
+                BuilderCapture& slot =
+                    g_builderCaptures[
+                        (sequence - 1) &
+                        (BUILDER_CAPTURE_SLOTS - 1)];
+
+                if (InterlockedCompareExchange(
+                        &slot.sequence,
+                        0,
+                        0) != sequence)
+                {
+                    continue;
+                }
+
+                if (slot.detection == currentPlayer1)
+                {
+                    if (!player1Capture ||
+                        (player1Capture->cents != 0 &&
+                         slot.cents == 0))
+                    {
+                        player1Capture = &slot;
+                        player1Sequence = sequence;
+                    }
+
+                    continue;
+                }
+
+                if (slot.detection != 0 &&
+                    currentPlayer1 != 0 &&
+                    slot.detection != currentPlayer1)
+                {
+                    if (!player2Capture ||
+                        (player2Capture->cents != 0 &&
+                         slot.cents == 0))
+                    {
+                        player2Capture = &slot;
+                        player2Sequence = sequence;
+                    }
+                }
+            }
+
+            log << "\nBUILDER CALL CONTEXT\n";
+
+            if (!player1Capture)
+            {
+                log << "  no P1 builder context captured\n";
+            }
+            else
+            {
+                AppendBuilderCallContext(
+                    log,
+                    player1Sequence,
+                    *player1Capture,
+                    "<P1>");
+            }
+
+            if (!player2Capture)
+            {
+                log << "  no P2 builder context captured\n\n";
+                return;
+            }
+
+            AppendBuilderCallContext(
+                log,
+                player2Sequence,
+                *player2Capture,
+                "<P2 candidate>");
+
+            if (!player1Capture)
+                return;
+
+            log << "BUILDER CONTEXT P1/P2 POINTER PAIRS\n";
+
+            TraceContextCandidatePair(log, "EAX", player1Capture->eax, player2Capture->eax);
+            TraceContextCandidatePair(log, "EBX", player1Capture->ebx, player2Capture->ebx);
+            TraceContextCandidatePair(log, "ECX", player1Capture->ecx, player2Capture->ecx);
+            TraceContextCandidatePair(log, "EDX", player1Capture->edx, player2Capture->edx);
+            TraceContextCandidatePair(log, "EDI", player1Capture->edi, player2Capture->edi);
+            TraceContextCandidatePair(log, "EBP", player1Capture->ebp, player2Capture->ebp);
+
+            for (size_t i = 0;
+                 i < BUILDER_STACK_DWORDS;
+                 ++i)
+            {
+                char label[32] = {};
+                sprintf_s(
+                    label,
+                    "stack+0x%02X",
+                    static_cast<unsigned int>(
+                        i * sizeof(std::uintptr_t)));
+
+                TraceContextCandidatePair(
+                    log,
+                    label,
+                    player1Capture->stack[i],
+                    player2Capture->stack[i]);
+            }
+
+            log << "\n";
         }
 
         void AppendBuilderCaptureSummary(
@@ -2902,6 +3182,12 @@ namespace RocksmithTuning
                 }
             }
 
+            AppendBuilderContextComparison(
+                log,
+                firstSequence,
+                total,
+                currentPlayer1);
+
             g_builderLastDumpSequence = total;
         }
 
@@ -2987,7 +3273,7 @@ namespace RocksmithTuning
         std::ostringstream log;
 
         log << "============================================================\n";
-        log << "RL-Mods tuning-reference builder diagnostic\n";
+        log << "RL-Mods tuning-reference builder context diagnostic\n";
         log << std::setfill('0')
             << std::dec
             << now.wYear << '-'
