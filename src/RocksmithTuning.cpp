@@ -1964,6 +1964,417 @@ namespace RocksmithTuning
             return true;
         }
 
+        // Temporary multiplayer diagnostic: capture every call to Rocksmith's
+        // tuning-reference builder. The builder receives the detection object in
+        // ESI and the authored reference cents as its first stack argument. This
+        // identifies the player-specific detection objects without scanning the heap.
+        constexpr std::uintptr_t REFERENCE_BUILDER_2022 =
+            0x004DCCB0;
+        constexpr std::uintptr_t REFERENCE_BUILDER_2024_OFFSET =
+            0x002AD930;
+        constexpr LONG BUILDER_CAPTURE_SLOTS = 64;
+        constexpr DWORD TRAP_FLAG = 0x100;
+
+        struct BuilderCapture
+        {
+            volatile LONG sequence = 0;
+            std::uintptr_t detection = 0;
+            LONG cents = 0;
+            DWORD threadId = 0;
+            ULONGLONG tick = 0;
+        };
+
+        BuilderCapture g_builderCaptures[BUILDER_CAPTURE_SLOTS]{};
+        volatile LONG g_builderCaptureCount = 0;
+        LONG g_builderLastDumpSequence = 0;
+
+        std::uintptr_t g_referenceBuilder = 0;
+        BYTE g_referenceBuilderOriginalByte = 0;
+        PVOID g_builderVehHandle = nullptr;
+        volatile LONG g_builderHookInstalled = 0;
+        __declspec(thread) LONG g_builderSingleStepActive = 0;
+
+        std::uintptr_t ResolveReferenceBuilder()
+        {
+            if (GetExecutableVersion() ==
+                ExecutableVersion::Remastered2022)
+            {
+                return REFERENCE_BUILDER_2022;
+            }
+
+            HMODULE gameModule =
+                GetModuleHandleW(nullptr);
+
+            if (!gameModule)
+                return 0;
+
+            return
+                reinterpret_cast<std::uintptr_t>(
+                    gameModule) +
+                REFERENCE_BUILDER_2024_OFFSET;
+        }
+
+        LONG CALLBACK ReferenceBuilderVeh(
+            PEXCEPTION_POINTERS exceptionInfo)
+        {
+#if defined(_M_IX86)
+            if (!exceptionInfo ||
+                !exceptionInfo->ExceptionRecord ||
+                !exceptionInfo->ContextRecord)
+            {
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+
+            const DWORD code =
+                exceptionInfo->ExceptionRecord->ExceptionCode;
+
+            CONTEXT* context =
+                exceptionInfo->ContextRecord;
+
+            if (code == EXCEPTION_BREAKPOINT)
+            {
+                const std::uintptr_t exceptionAddress =
+                    reinterpret_cast<std::uintptr_t>(
+                        exceptionInfo->ExceptionRecord->ExceptionAddress);
+
+                if (exceptionAddress !=
+                    g_referenceBuilder)
+                {
+                    return EXCEPTION_CONTINUE_SEARCH;
+                }
+
+                LONG cents = 0;
+
+                __try
+                {
+                    cents =
+                        *reinterpret_cast<const LONG*>(
+                            context->Esp + sizeof(std::uint32_t));
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    cents = 0x7FFFFFFF;
+                }
+
+                const LONG sequence =
+                    InterlockedIncrement(
+                        &g_builderCaptureCount);
+
+                BuilderCapture& capture =
+                    g_builderCaptures[
+                        (sequence - 1) &
+                        (BUILDER_CAPTURE_SLOTS - 1)];
+
+                capture.detection =
+                    static_cast<std::uintptr_t>(
+                        context->Esi);
+                capture.cents = cents;
+                capture.threadId =
+                    GetCurrentThreadId();
+                capture.tick =
+                    GetTickCount64();
+
+                MemoryBarrier();
+                InterlockedExchange(
+                    &capture.sequence,
+                    sequence);
+
+                *reinterpret_cast<volatile BYTE*>(
+                    g_referenceBuilder) =
+                    g_referenceBuilderOriginalByte;
+
+                FlushInstructionCache(
+                    GetCurrentProcess(),
+                    reinterpret_cast<const void*>(
+                        g_referenceBuilder),
+                    1);
+
+                context->Eip =
+                    static_cast<DWORD>(
+                        g_referenceBuilder);
+                context->EFlags |= TRAP_FLAG;
+                g_builderSingleStepActive = 1;
+
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+
+            if (code == EXCEPTION_SINGLE_STEP &&
+                g_builderSingleStepActive != 0)
+            {
+                *reinterpret_cast<volatile BYTE*>(
+                    g_referenceBuilder) = 0xCC;
+
+                FlushInstructionCache(
+                    GetCurrentProcess(),
+                    reinterpret_cast<const void*>(
+                        g_referenceBuilder),
+                    1);
+
+                context->EFlags &= ~TRAP_FLAG;
+                g_builderSingleStepActive = 0;
+
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+#else
+            (void)exceptionInfo;
+#endif
+
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        bool InstallReferenceBuilderDiagnostic()
+        {
+#if !defined(_M_IX86)
+            return false;
+#else
+            if (InterlockedCompareExchange(
+                    &g_builderHookInstalled,
+                    0,
+                    0) != 0)
+            {
+                return true;
+            }
+
+            const std::uintptr_t builder =
+                ResolveReferenceBuilder();
+
+            if (!builder ||
+                !IsReadableRange(
+                    reinterpret_cast<const void*>(
+                        builder),
+                    1))
+            {
+                return false;
+            }
+
+            BYTE original = 0;
+
+            if (!TryReadValue(
+                    builder,
+                    original) ||
+                original == 0xCC)
+            {
+                return false;
+            }
+
+            PVOID handler =
+                AddVectoredExceptionHandler(
+                    1,
+                    ReferenceBuilderVeh);
+
+            if (!handler)
+                return false;
+
+            DWORD oldProtect = 0;
+
+            if (!VirtualProtect(
+                    reinterpret_cast<void*>(builder),
+                    1,
+                    PAGE_EXECUTE_READWRITE,
+                    &oldProtect))
+            {
+                RemoveVectoredExceptionHandler(
+                    handler);
+                return false;
+            }
+
+            g_referenceBuilder = builder;
+            g_referenceBuilderOriginalByte =
+                original;
+            g_builderVehHandle = handler;
+
+            *reinterpret_cast<volatile BYTE*>(
+                builder) = 0xCC;
+
+            FlushInstructionCache(
+                GetCurrentProcess(),
+                reinterpret_cast<const void*>(builder),
+                1);
+
+            InterlockedExchange(
+                &g_builderHookInstalled,
+                1);
+
+            g_builderLastDumpSequence =
+                InterlockedCompareExchange(
+                    &g_builderCaptureCount,
+                    0,
+                    0);
+
+            return true;
+#endif
+        }
+
+        void AppendBuilderCaptureSummary(
+            std::ostringstream& log)
+        {
+            const LONG total =
+                InterlockedCompareExchange(
+                    &g_builderCaptureCount,
+                    0,
+                    0);
+
+            LONG firstSequence =
+                g_builderLastDumpSequence + 1;
+
+            const LONG oldestAvailable =
+                total >= BUILDER_CAPTURE_SLOTS
+                ? total - BUILDER_CAPTURE_SLOTS + 1
+                : 1;
+
+            if (firstSequence < oldestAvailable)
+            {
+                log << "  NOTE: older captures were overwritten; showing newest "
+                    << BUILDER_CAPTURE_SLOTS
+                    << " events\n";
+                firstSequence = oldestAvailable;
+            }
+
+            const std::uintptr_t currentPlayer1 =
+                ResolveConfiguredDetectionObject();
+
+            log << "  current P1 detection: "
+                << AddressText(currentPlayer1)
+                << "\n";
+            log << "  captured builder calls since previous F10: "
+                << (total >= firstSequence
+                    ? total - firstSequence + 1
+                    : 0)
+                << "\n";
+
+            struct DetectionSummary
+            {
+                std::uintptr_t detection = 0;
+                LONG lastCents = 0;
+                LONG callCount = 0;
+            };
+
+            std::vector<DetectionSummary> detections;
+
+            for (LONG sequence = firstSequence;
+                 sequence <= total;
+                 ++sequence)
+            {
+                BuilderCapture& slot =
+                    g_builderCaptures[
+                        (sequence - 1) &
+                        (BUILDER_CAPTURE_SLOTS - 1)];
+
+                const LONG published =
+                    InterlockedCompareExchange(
+                        &slot.sequence,
+                        0,
+                        0);
+
+                if (published != sequence)
+                    continue;
+
+                const std::uintptr_t detection =
+                    slot.detection;
+
+                log << "  event "
+                    << sequence
+                    << ": detection="
+                    << AddressText(detection)
+                    << " cents=";
+
+                if (slot.cents == 0x7FFFFFFF)
+                    log << "<unreadable>";
+                else
+                    log << slot.cents;
+
+                log << " thread="
+                    << slot.threadId;
+
+                if (detection == currentPlayer1)
+                    log << "  <current P1>";
+
+                log << "\n";
+
+                bool found = false;
+
+                for (auto& summary : detections)
+                {
+                    if (summary.detection == detection)
+                    {
+                        summary.lastCents = slot.cents;
+                        ++summary.callCount;
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found && detection != 0)
+                {
+                    DetectionSummary summary{};
+                    summary.detection = detection;
+                    summary.lastCents = slot.cents;
+                    summary.callCount = 1;
+                    detections.push_back(summary);
+                }
+            }
+
+            log << "\nUNIQUE DETECTION OBJECTS\n";
+
+            if (detections.empty())
+            {
+                log << "  none captured\n";
+            }
+
+            for (size_t i = 0;
+                 i < detections.size();
+                 ++i)
+            {
+                const auto& summary =
+                    detections[i];
+
+                float reference = 0.0f;
+                TryReadValue(
+                    summary.detection + 0x135C,
+                    reference);
+
+                log << "  object "
+                    << (i + 1)
+                    << ": "
+                    << AddressText(summary.detection)
+                    << " calls="
+                    << summary.callCount
+                    << " lastCents=";
+
+                if (summary.lastCents == 0x7FFFFFFF)
+                    log << "<unreadable>";
+                else
+                    log << summary.lastCents;
+
+                log << " +0x135C="
+                    << reference;
+
+                if (summary.detection == currentPlayer1)
+                    log << "  <current P1>";
+                else if (currentPlayer1 != 0)
+                    log << "  <P2/other candidate>";
+
+                log << "\n";
+
+                int referenceHz =
+                    static_cast<int>(
+                        std::round(reference));
+
+                if (referenceHz < 100 ||
+                    referenceHz > 1000)
+                {
+                    referenceHz = 440;
+                }
+
+                TraceDetectionTuningSignatures(
+                    log,
+                    summary.detection,
+                    referenceHz);
+            }
+
+            g_builderLastDumpSequence = total;
+        }
+
         const char* NoteNameFromOffset(
             int semitonesFromE)
         {
@@ -2028,15 +2439,17 @@ namespace RocksmithTuning
 
     bool CaptureDebugSnapshot()
     {
-        HMODULE gameModule =
-            GetModuleHandleW(nullptr);
+        const bool alreadyInstalled =
+            InterlockedCompareExchange(
+                &g_builderHookInstalled,
+                0,
+                0) != 0;
 
-        if (!gameModule)
+        if (!alreadyInstalled &&
+            !InstallReferenceBuilderDiagnostic())
+        {
             return false;
-
-        const std::uintptr_t base =
-            reinterpret_cast<std::uintptr_t>(
-                gameModule);
+        }
 
         SYSTEMTIME now{};
         GetLocalTime(&now);
@@ -2044,7 +2457,7 @@ namespace RocksmithTuning
         std::ostringstream log;
 
         log << "============================================================\n";
-        log << "RL-Mods tuning debug capture\n";
+        log << "RL-Mods tuning-reference builder diagnostic\n";
         log << std::setfill('0')
             << std::dec
             << now.wYear << '-'
@@ -2060,70 +2473,10 @@ namespace RocksmithTuning
                 ? "2024"
                 : "2022")
             << "\n";
-        log << "Rocksmith module base: "
-            << AddressText(base)
-            << "\n\n";
-
-        TraceStringPointer(
-            log,
-            "CURRENT MENU - 2022 absolute root",
-            CURRENT_MENU_2022_ROOT,
-            CURRENT_MENU_OFFSETS);
-
-        TraceStringPointer(
-            log,
-            "CURRENT MENU - 2024 module-relative root",
-            base +
-                CURRENT_MENU_2024_ROOT_OFFSET,
-            CURRENT_MENU_OFFSETS);
-
-        TraceStringPointer(
-            log,
-            "TUNER TEXT - 2022 module-relative root",
-            base +
-                TUNER_TEXT_2022_ROOT,
-            TUNER_TEXT_OFFSETS);
-
-        TraceStringPointer(
-            log,
-            "TUNER TEXT - 2024 module-relative root",
-            base +
-                TUNER_TEXT_2024_ROOT_OFFSET,
-            TUNER_TEXT_OFFSETS);
-
-        TraceDetectionObjects(
-            log);
-
-        TraceArrangementPointer(
-            log,
-            "ARRANGEMENT - 2022 module-relative root",
-            base +
-                ARRANGEMENT_2022_ROOT,
-            ARRANGEMENT_OFFSETS);
-
-        TraceArrangementPointer(
-            log,
-            "ARRANGEMENT - 2024 module-relative root",
-            base +
-                ARRANGEMENT_2024_ROOT_OFFSET,
-            ARRANGEMENT_OFFSETS);
-
-        TraceFloatPointer(
-            log,
-            "TRUE TUNING - 2022 module-relative root",
-            base +
-                TRUE_TUNING_2022_ROOT,
-            TRUE_TUNING_OFFSETS);
-
-        TraceFloatPointer(
-            log,
-            "TRUE TUNING - 2024 module-relative root",
-            base +
-                TRUE_TUNING_2024_ROOT_OFFSET,
-            TRUE_TUNING_OFFSETS);
-
-        log << "NORMAL RL-MODS READERS\n";
-        log << "  CurrentMenu(): ";
+        log << "Reference builder: "
+            << AddressText(g_referenceBuilder)
+            << "\n";
+        log << "Current menu: ";
 
         const std::string menu =
             CurrentMenu();
@@ -2131,38 +2484,63 @@ namespace RocksmithTuning
         log << (menu.empty()
                 ? "<empty/unresolved>"
                 : menu)
-            << "\n";
+            << "\n\n";
 
-        Tuning arrangement{};
-
-        if (TryReadArrangement(
-                arrangement))
+        if (!alreadyInstalled)
         {
-            log << "  TryReadArrangement(): "
-                << VectorText(
-                    arrangement)
-                << " / "
-                << Name(
-                    arrangement)
-                << "\n";
+            log << "BUILDER HOOK ARMED\n";
+            log << "  This first F10 only arms the capture hook.\n";
+            log << "  Enter/re-enter a pre-song tuner, then press F10 there.\n";
         }
         else
         {
-            log << "  TryReadArrangement(): FAILED\n";
-        }
+            AppendBuilderCaptureSummary(
+                log);
 
-        int referenceHz = 0;
+            log << "\nNORMAL RL-MODS READERS\n";
 
-        if (TryReadReferenceHz(
-                referenceHz))
-        {
-            log << "  TryReadReferenceHz(): A"
-                << referenceHz
-                << "\n";
-        }
-        else
-        {
-            log << "  TryReadReferenceHz(): FAILED\n";
+            Tuning target{};
+
+            if (TryReadTunerTarget(target))
+            {
+                log << "  TryReadTunerTarget(): "
+                    << VectorText(target)
+                    << " / "
+                    << Name(target)
+                    << "\n";
+            }
+            else
+            {
+                log << "  TryReadTunerTarget(): FAILED\n";
+            }
+
+            Tuning arrangement{};
+
+            if (TryReadArrangement(arrangement))
+            {
+                log << "  TryReadArrangement(): "
+                    << VectorText(arrangement)
+                    << " / "
+                    << Name(arrangement)
+                    << "\n";
+            }
+            else
+            {
+                log << "  TryReadArrangement(): FAILED\n";
+            }
+
+            int referenceHz = 0;
+
+            if (TryReadReferenceHz(referenceHz))
+            {
+                log << "  TryReadReferenceHz(): A"
+                    << referenceHz
+                    << "\n";
+            }
+            else
+            {
+                log << "  TryReadReferenceHz(): FAILED\n";
+            }
         }
 
         log << "============================================================\n\n";
