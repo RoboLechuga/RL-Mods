@@ -8,11 +8,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <string>
-#include <vector>
 
 namespace RocksmithTuning
 {
@@ -1060,1377 +1058,6 @@ namespace RocksmithTuning
                     tuning);
         }
 
-        bool LooksLikeDiagnosticText(
-            const std::string& text)
-        {
-            if (text.size() < 3 ||
-                text.size() > 127)
-            {
-                return false;
-            }
-
-            size_t alphaNumeric = 0;
-
-            for (unsigned char c : text)
-            {
-                if (c < 32 || c == 127)
-                    return false;
-
-                if (std::isalnum(c))
-                    ++alphaNumeric;
-            }
-
-            return alphaNumeric >= 2;
-        }
-
-        void TraceObjectFieldMap(
-            std::ostringstream& log,
-            const char* label,
-            std::uintptr_t object,
-            std::uintptr_t maxOffset,
-            bool followOneLevel)
-        {
-            constexpr std::uintptr_t FIELD_STEP = 0x4;
-            constexpr std::uintptr_t NESTED_MAX_OFFSET = 0x100;
-
-            log << label << "\n";
-            log << "  object: "
-                << AddressText(object)
-                << "\n";
-
-            if (!object)
-            {
-                log << "  result: NULL\n\n";
-                return;
-            }
-
-            std::vector<std::uintptr_t> seenStrings;
-
-            for (std::uintptr_t offset = 0;
-                 offset <= maxOffset;
-                 offset += FIELD_STEP)
-            {
-                if (object > UINTPTR_MAX - offset)
-                    break;
-
-                const std::uintptr_t fieldAddress =
-                    object + offset;
-
-                std::uintptr_t value = 0;
-
-                if (!TryReadValue(
-                        fieldAddress,
-                        value))
-                {
-                    log << "  +"
-                        << AddressText(offset)
-                        << " = <unreadable>\n";
-                    continue;
-                }
-
-                log << "  +"
-                    << AddressText(offset)
-                    << " = "
-                    << AddressText(value);
-
-                if (value == 0)
-                {
-                    log << "\n";
-                    continue;
-                }
-
-                const std::string directText =
-                    ReadString(
-                        value,
-                        128);
-
-                if (LooksLikeDiagnosticText(
-                        directText))
-                {
-                    log << "  -> \""
-                        << directText
-                        << "\"";
-
-                    seenStrings.push_back(value);
-                }
-
-                log << "\n";
-
-                if (!followOneLevel)
-                    continue;
-
-                for (std::uintptr_t nestedOffset = 0;
-                     nestedOffset <= NESTED_MAX_OFFSET;
-                     nestedOffset += FIELD_STEP)
-                {
-                    if (value >
-                        UINTPTR_MAX -
-                        nestedOffset)
-                    {
-                        break;
-                    }
-
-                    std::uintptr_t nestedValue = 0;
-
-                    if (!TryReadValue(
-                            value + nestedOffset,
-                            nestedValue) ||
-                        nestedValue == 0)
-                    {
-                        continue;
-                    }
-
-                    bool alreadySeen = false;
-
-                    for (const std::uintptr_t seen :
-                         seenStrings)
-                    {
-                        if (seen == nestedValue)
-                        {
-                            alreadySeen = true;
-                            break;
-                        }
-                    }
-
-                    if (alreadySeen)
-                        continue;
-
-                    const std::string nestedText =
-                        ReadString(
-                            nestedValue,
-                            128);
-
-                    if (!LooksLikeDiagnosticText(
-                            nestedText))
-                    {
-                        continue;
-                    }
-
-                    seenStrings.push_back(
-                        nestedValue);
-
-                    log << "      -> +"
-                        << AddressText(nestedOffset)
-                        << " = "
-                        << AddressText(nestedValue)
-                        << "  \""
-                        << nestedText
-                        << "\"\n";
-                }
-            }
-
-            log << "\n";
-        }
-
-        void TraceTunerObjectStructure(
-            std::ostringstream& log,
-            const char* label,
-            std::uintptr_t root)
-        {
-            constexpr std::uintptr_t KNOWN_CHILD_OFFSET = 0x28;
-            constexpr std::uintptr_t ROOT_MAX_OFFSET = 0x100;
-            constexpr std::uintptr_t CHILD_MAX_OFFSET = 0x180;
-
-            log << label << "\n";
-            log << "  root: "
-                << AddressText(root)
-                << "\n";
-
-            std::uintptr_t rootObject = 0;
-
-            if (!TryReadValue(
-                    root,
-                    rootObject) ||
-                rootObject == 0)
-            {
-                log << "  root object: FAILED\n\n";
-                return;
-            }
-
-            log << "  root object: "
-                << AddressText(rootObject)
-                << "\n";
-
-            std::uintptr_t knownChild = 0;
-
-            if (rootObject <=
-                UINTPTR_MAX -
-                KNOWN_CHILD_OFFSET)
-            {
-                TryReadValue(
-                    rootObject +
-                        KNOWN_CHILD_OFFSET,
-                    knownChild);
-            }
-
-            log << "  known child (root + 0x28): "
-                << AddressText(knownChild)
-                << "\n\n";
-
-            TraceObjectFieldMap(
-                log,
-                "ROOT OBJECT FIELD MAP",
-                rootObject,
-                ROOT_MAX_OFFSET,
-                true);
-
-            TraceObjectFieldMap(
-                log,
-                "KNOWN TUNER CHILD FIELD MAP",
-                knownChild,
-                CHILD_MAX_OFFSET,
-                true);
-        }
-
-        std::uintptr_t ResolveConfiguredDetectionObject()
-        {
-            HMODULE gameModule =
-                GetModuleHandleW(nullptr);
-
-            if (!gameModule)
-                return 0;
-
-            const std::uintptr_t base =
-                reinterpret_cast<std::uintptr_t>(
-                    gameModule);
-
-            const std::uintptr_t rootOffset =
-                GetExecutableVersion() ==
-                    ExecutableVersion::LearnAndPlay2024
-                ? TRUE_TUNING_2024_ROOT_OFFSET
-                : TRUE_TUNING_2022_ROOT;
-
-            std::uintptr_t address =
-                base + rootOffset;
-
-            std::uintptr_t next = 0;
-
-            if (!TryReadValue(address, next) ||
-                next == 0)
-            {
-                return 0;
-            }
-
-            address = next + 0x10;
-
-            if (!TryReadValue(address, next) ||
-                next == 0)
-            {
-                return 0;
-            }
-
-            address = next + 0x4;
-
-            if (!TryReadValue(address, next) ||
-                next == 0)
-            {
-                return 0;
-            }
-
-            return next;
-        }
-
-        const char* FindKnownTuningKey(
-            const std::array<int, 6>& values)
-        {
-            for (const auto& definition :
-                 TUNING_DEFINITIONS)
-            {
-                if (values == definition.strings)
-                    return definition.key;
-            }
-
-            return nullptr;
-        }
-
-        bool IsAllZeroTuning(
-            const std::array<int, 6>& values)
-        {
-            for (const int value : values)
-            {
-                if (value != 0)
-                    return false;
-            }
-
-            return true;
-        }
-
-        void TraceDetectionTuningSignatures(
-            std::ostringstream& log,
-            std::uintptr_t object,
-            int referenceHz)
-        {
-            constexpr std::uintptr_t SCAN_BYTES = 0x1800;
-            constexpr int BASE_MIDI[6] =
-            {
-                40, 45, 50, 55, 59, 64
-            };
-            constexpr size_t MAX_HITS = 32;
-
-            size_t hits = 0;
-
-            auto report =
-                [&](const char* kind,
-                    std::uintptr_t offset,
-                    const std::array<int, 6>& tuning,
-                    const char* key)
-                {
-                    if (hits >= MAX_HITS)
-                        return;
-
-                    log << "    "
-                        << kind
-                        << " at +"
-                        << AddressText(offset)
-                        << ": [";
-
-                    for (size_t i = 0;
-                         i < tuning.size();
-                         ++i)
-                    {
-                        if (i != 0)
-                            log << ',';
-
-                        log << tuning[i];
-                    }
-
-                    log << "]  "
-                        << key
-                        << "\n";
-
-                    ++hits;
-                };
-
-            for (std::uintptr_t offset = 0;
-                 offset + 12 <= SCAN_BYTES &&
-                 hits < MAX_HITS;
-                 ++offset)
-            {
-                std::array<int, 6> values{};
-                bool valid = true;
-
-                for (size_t i = 0;
-                     i < values.size();
-                     ++i)
-                {
-                    std::uint8_t raw = 0;
-
-                    if (!TryReadValue(
-                            object + offset + i,
-                            raw))
-                    {
-                        valid = false;
-                        break;
-                    }
-
-                    values[i] =
-                        static_cast<int>(
-                            static_cast<std::int8_t>(
-                                raw));
-
-                    if (values[i] < -24 ||
-                        values[i] > 24)
-                    {
-                        valid = false;
-                        break;
-                    }
-                }
-
-                if (valid &&
-                    !IsAllZeroTuning(values))
-                {
-                    const char* key =
-                        FindKnownTuningKey(values);
-
-                    if (key)
-                    {
-                        report(
-                            "signed-byte tuning",
-                            offset,
-                            values,
-                            key);
-                    }
-                }
-
-                valid = true;
-
-                for (size_t i = 0;
-                     i < values.size();
-                     ++i)
-                {
-                    std::uint8_t raw = 0;
-
-                    if (!TryReadValue(
-                            object + offset +
-                                (i * 2),
-                            raw))
-                    {
-                        valid = false;
-                        break;
-                    }
-
-                    values[i] =
-                        static_cast<int>(
-                            static_cast<std::int8_t>(
-                                raw));
-
-                    if (values[i] < -24 ||
-                        values[i] > 24)
-                    {
-                        valid = false;
-                        break;
-                    }
-                }
-
-                if (valid &&
-                    !IsAllZeroTuning(values))
-                {
-                    const char* key =
-                        FindKnownTuningKey(values);
-
-                    if (key)
-                    {
-                        report(
-                            "stride-2 tuning",
-                            offset,
-                            values,
-                            key);
-                    }
-                }
-
-                valid = true;
-
-                for (size_t i = 0;
-                     i < values.size();
-                     ++i)
-                {
-                    std::uint8_t raw = 0;
-
-                    if (!TryReadValue(
-                            object + offset + i,
-                            raw))
-                    {
-                        valid = false;
-                        break;
-                    }
-
-                    values[i] =
-                        static_cast<int>(raw) -
-                        BASE_MIDI[i];
-
-                    if (values[i] < -24 ||
-                        values[i] > 24)
-                    {
-                        valid = false;
-                        break;
-                    }
-                }
-
-                if (valid)
-                {
-                    const char* key =
-                        FindKnownTuningKey(values);
-
-                    if (key)
-                    {
-                        report(
-                            "MIDI-byte tuning",
-                            offset,
-                            values,
-                            key);
-                    }
-                }
-            }
-
-            for (std::uintptr_t offset = 0;
-                 offset + 24 <= SCAN_BYTES &&
-                 hits < MAX_HITS;
-                 offset += 4)
-            {
-                std::array<int, 6> values{};
-                bool valid = true;
-
-                for (size_t i = 0;
-                     i < values.size();
-                     ++i)
-                {
-                    std::int32_t raw = 0;
-
-                    if (!TryReadValue(
-                            object + offset +
-                                (i * sizeof(raw)),
-                            raw))
-                    {
-                        valid = false;
-                        break;
-                    }
-
-                    if (raw < -24 ||
-                        raw > 24)
-                    {
-                        valid = false;
-                        break;
-                    }
-
-                    values[i] =
-                        static_cast<int>(raw);
-                }
-
-                if (valid &&
-                    !IsAllZeroTuning(values))
-                {
-                    const char* key =
-                        FindKnownTuningKey(values);
-
-                    if (key)
-                    {
-                        report(
-                            "int32 tuning",
-                            offset,
-                            values,
-                            key);
-                    }
-                }
-
-                valid = true;
-
-                for (size_t i = 0;
-                     i < values.size();
-                     ++i)
-                {
-                    std::int32_t raw = 0;
-
-                    if (!TryReadValue(
-                            object + offset +
-                                (i * sizeof(raw)),
-                            raw))
-                    {
-                        valid = false;
-                        break;
-                    }
-
-                    values[i] =
-                        static_cast<int>(raw) -
-                        BASE_MIDI[i];
-
-                    if (values[i] < -24 ||
-                        values[i] > 24)
-                    {
-                        valid = false;
-                        break;
-                    }
-                }
-
-                if (valid)
-                {
-                    const char* key =
-                        FindKnownTuningKey(values);
-
-                    if (key)
-                    {
-                        report(
-                            "MIDI-int32 tuning",
-                            offset,
-                            values,
-                            key);
-                    }
-                }
-
-                if (referenceHz <= 0)
-                    continue;
-
-                valid = true;
-
-                for (size_t i = 0;
-                     i < values.size();
-                     ++i)
-                {
-                    float frequency = 0.0f;
-
-                    if (!TryReadValue(
-                            object + offset +
-                                (i * sizeof(float)),
-                            frequency) ||
-                        !std::isfinite(frequency) ||
-                        frequency < 20.0f ||
-                        frequency > 2000.0f)
-                    {
-                        valid = false;
-                        break;
-                    }
-
-                    const double midiExact =
-                        69.0 +
-                        12.0 *
-                            std::log2(
-                                static_cast<double>(frequency) /
-                                static_cast<double>(referenceHz));
-
-                    const int midi =
-                        static_cast<int>(
-                            std::round(midiExact));
-
-                    if (std::fabs(
-                            midiExact -
-                            static_cast<double>(midi)) >
-                        0.03)
-                    {
-                        valid = false;
-                        break;
-                    }
-
-                    values[i] =
-                        midi -
-                        BASE_MIDI[i];
-
-                    if (values[i] < -24 ||
-                        values[i] > 24)
-                    {
-                        valid = false;
-                        break;
-                    }
-                }
-
-                if (valid)
-                {
-                    const char* key =
-                        FindKnownTuningKey(values);
-
-                    if (key)
-                    {
-                        report(
-                            "float-frequency tuning",
-                            offset,
-                            values,
-                            key);
-                    }
-                }
-            }
-
-            if (hits == 0)
-            {
-                log << "    no known tuning signatures found\n";
-            }
-            else if (hits >= MAX_HITS)
-            {
-                log << "    hit limit reached\n";
-            }
-        }
-
-        bool TryReadSignedByteTuningAt(
-            std::uintptr_t object,
-            std::uintptr_t offset,
-            std::uintptr_t stride,
-            std::array<int, 6>& values)
-        {
-            for (size_t i = 0;
-                 i < values.size();
-                 ++i)
-            {
-                std::uint8_t raw = 0;
-
-                if (!TryReadValue(
-                        object + offset +
-                            (i * stride),
-                        raw))
-                {
-                    return false;
-                }
-
-                const int value =
-                    static_cast<int>(
-                        static_cast<std::int8_t>(raw));
-
-                if (value < -24 ||
-                    value > 24)
-                {
-                    return false;
-                }
-
-                values[i] = value;
-            }
-
-            return true;
-        }
-
-        bool TryReadMidiByteTuningAt(
-            std::uintptr_t object,
-            std::uintptr_t offset,
-            std::array<int, 6>& values)
-        {
-            constexpr int BASE_MIDI[6] =
-            {
-                40, 45, 50, 55, 59, 64
-            };
-
-            for (size_t i = 0;
-                 i < values.size();
-                 ++i)
-            {
-                std::uint8_t raw = 0;
-
-                if (!TryReadValue(
-                        object + offset + i,
-                        raw))
-                {
-                    return false;
-                }
-
-                const int value =
-                    static_cast<int>(raw) -
-                    BASE_MIDI[i];
-
-                if (value < -24 ||
-                    value > 24)
-                {
-                    return false;
-                }
-
-                values[i] = value;
-            }
-
-            return true;
-        }
-
-        bool TryReadInt32TuningAt(
-            std::uintptr_t object,
-            std::uintptr_t offset,
-            bool midiValues,
-            std::array<int, 6>& values)
-        {
-            constexpr int BASE_MIDI[6] =
-            {
-                40, 45, 50, 55, 59, 64
-            };
-
-            for (size_t i = 0;
-                 i < values.size();
-                 ++i)
-            {
-                std::int32_t raw = 0;
-
-                if (!TryReadValue(
-                        object + offset +
-                            (i * sizeof(raw)),
-                        raw))
-                {
-                    return false;
-                }
-
-                const int value =
-                    midiValues
-                    ? static_cast<int>(raw) -
-                        BASE_MIDI[i]
-                    : static_cast<int>(raw);
-
-                if (value < -24 ||
-                    value > 24)
-                {
-                    return false;
-                }
-
-                values[i] = value;
-            }
-
-            return true;
-        }
-
-        bool TryReadInt32CentTuningAt(
-            std::uintptr_t object,
-            std::uintptr_t offset,
-            std::array<int, 6>& values)
-        {
-            for (size_t i = 0;
-                 i < values.size();
-                 ++i)
-            {
-                std::int32_t cents = 0;
-
-                if (!TryReadValue(
-                        object + offset +
-                            (i * sizeof(cents)),
-                        cents) ||
-                    cents < -2400 ||
-                    cents > 2400 ||
-                    (cents % 100) != 0)
-                {
-                    return false;
-                }
-
-                values[i] =
-                    static_cast<int>(cents / 100);
-            }
-
-            return true;
-        }
-
-        bool TryReadInt16CentTuningAt(
-            std::uintptr_t object,
-            std::uintptr_t offset,
-            std::array<int, 6>& values)
-        {
-            for (size_t i = 0;
-                 i < values.size();
-                 ++i)
-            {
-                std::int16_t cents = 0;
-
-                if (!TryReadValue(
-                        object + offset +
-                            (i * sizeof(cents)),
-                        cents) ||
-                    cents < -2400 ||
-                    cents > 2400 ||
-                    (cents % 100) != 0)
-                {
-                    return false;
-                }
-
-                values[i] =
-                    static_cast<int>(cents / 100);
-            }
-
-            return true;
-        }
-
-        bool TryReadFloatFrequencyTuningAt(
-            std::uintptr_t object,
-            std::uintptr_t offset,
-            int referenceHz,
-            std::array<int, 6>& values)
-        {
-            constexpr int BASE_MIDI[6] =
-            {
-                40, 45, 50, 55, 59, 64
-            };
-
-            if (referenceHz < 100 ||
-                referenceHz > 1000)
-            {
-                referenceHz = 440;
-            }
-
-            for (size_t i = 0;
-                 i < values.size();
-                 ++i)
-            {
-                float frequency = 0.0f;
-
-                if (!TryReadValue(
-                        object + offset +
-                            (i * sizeof(float)),
-                        frequency) ||
-                    !std::isfinite(frequency) ||
-                    frequency < 20.0f ||
-                    frequency > 2000.0f)
-                {
-                    return false;
-                }
-
-                const double midiExact =
-                    69.0 +
-                    12.0 *
-                        std::log2(
-                            static_cast<double>(frequency) /
-                            static_cast<double>(referenceHz));
-
-                const int midi =
-                    static_cast<int>(
-                        std::round(midiExact));
-
-                if (std::fabs(
-                        midiExact -
-                        static_cast<double>(midi)) >
-                    0.03)
-                {
-                    return false;
-                }
-
-                const int value =
-                    midi - BASE_MIDI[i];
-
-                if (value < -24 ||
-                    value > 24)
-                {
-                    return false;
-                }
-
-                values[i] = value;
-            }
-
-            return true;
-        }
-
-        void TraceDetectionPairTuningDifferences(
-            std::ostringstream& log,
-            std::uintptr_t player1,
-            std::uintptr_t player2)
-        {
-            constexpr std::uintptr_t SCAN_BYTES = 0x1800;
-            constexpr size_t MAX_HITS = 64;
-
-            log << "\nP1/P2 SAME-OFFSET TUNING DIFFERENCES\n";
-            log << "  P1: "
-                << AddressText(player1)
-                << "\n";
-            log << "  P2: "
-                << AddressText(player2)
-                << "\n";
-
-            if (!player1 || !player2 ||
-                player1 == player2)
-            {
-                log << "  result: invalid pair\n";
-                return;
-            }
-
-            float p1Reference = 440.0f;
-            float p2Reference = 440.0f;
-
-            TryReadValue(
-                player1 + 0x135C,
-                p1Reference);
-            TryReadValue(
-                player2 + 0x135C,
-                p2Reference);
-
-            const int p1ReferenceHz =
-                static_cast<int>(
-                    std::round(p1Reference));
-            const int p2ReferenceHz =
-                static_cast<int>(
-                    std::round(p2Reference));
-
-            size_t hits = 0;
-
-            auto report =
-                [&](const char* kind,
-                    std::uintptr_t offset,
-                    const std::array<int, 6>& p1Values,
-                    const char* p1Key,
-                    const std::array<int, 6>& p2Values,
-                    const char* p2Key)
-                {
-                    if (hits >= MAX_HITS)
-                        return;
-
-                    log << "  "
-                        << kind
-                        << " at +"
-                        << AddressText(offset)
-                        << ": P1 "
-                        << p1Key
-                        << " [";
-
-                    for (size_t i = 0;
-                         i < p1Values.size();
-                         ++i)
-                    {
-                        if (i != 0)
-                            log << ',';
-                        log << p1Values[i];
-                    }
-
-                    log << "]  |  P2 "
-                        << p2Key
-                        << " [";
-
-                    for (size_t i = 0;
-                         i < p2Values.size();
-                         ++i)
-                    {
-                        if (i != 0)
-                            log << ',';
-                        log << p2Values[i];
-                    }
-
-                    log << "]\n";
-                    ++hits;
-                };
-
-            auto maybeReport =
-                [&](const char* kind,
-                    std::uintptr_t offset,
-                    const std::array<int, 6>& p1Values,
-                    bool p1Valid,
-                    const std::array<int, 6>& p2Values,
-                    bool p2Valid)
-                {
-                    if (!p1Valid ||
-                        !p2Valid ||
-                        p1Values == p2Values)
-                    {
-                        return;
-                    }
-
-                    const char* p1Key =
-                        FindKnownTuningKey(p1Values);
-                    const char* p2Key =
-                        FindKnownTuningKey(p2Values);
-
-                    if (!p1Key || !p2Key)
-                        return;
-
-                    report(
-                        kind,
-                        offset,
-                        p1Values,
-                        p1Key,
-                        p2Values,
-                        p2Key);
-                };
-
-            for (std::uintptr_t offset = 0;
-                 offset + 12 <= SCAN_BYTES &&
-                 hits < MAX_HITS;
-                 ++offset)
-            {
-                std::array<int, 6> p1Values{};
-                std::array<int, 6> p2Values{};
-
-                maybeReport(
-                    "signed-byte",
-                    offset,
-                    p1Values,
-                    TryReadSignedByteTuningAt(
-                        player1,
-                        offset,
-                        1,
-                        p1Values),
-                    p2Values,
-                    TryReadSignedByteTuningAt(
-                        player2,
-                        offset,
-                        1,
-                        p2Values));
-
-                maybeReport(
-                    "stride-2 byte",
-                    offset,
-                    p1Values,
-                    TryReadSignedByteTuningAt(
-                        player1,
-                        offset,
-                        2,
-                        p1Values),
-                    p2Values,
-                    TryReadSignedByteTuningAt(
-                        player2,
-                        offset,
-                        2,
-                        p2Values));
-
-                maybeReport(
-                    "MIDI byte",
-                    offset,
-                    p1Values,
-                    TryReadMidiByteTuningAt(
-                        player1,
-                        offset,
-                        p1Values),
-                    p2Values,
-                    TryReadMidiByteTuningAt(
-                        player2,
-                        offset,
-                        p2Values));
-
-                maybeReport(
-                    "int16 cents",
-                    offset,
-                    p1Values,
-                    TryReadInt16CentTuningAt(
-                        player1,
-                        offset,
-                        p1Values),
-                    p2Values,
-                    TryReadInt16CentTuningAt(
-                        player2,
-                        offset,
-                        p2Values));
-            }
-
-            for (std::uintptr_t offset = 0;
-                 offset + 24 <= SCAN_BYTES &&
-                 hits < MAX_HITS;
-                 offset += 4)
-            {
-                std::array<int, 6> p1Values{};
-                std::array<int, 6> p2Values{};
-
-                maybeReport(
-                    "int32",
-                    offset,
-                    p1Values,
-                    TryReadInt32TuningAt(
-                        player1,
-                        offset,
-                        false,
-                        p1Values),
-                    p2Values,
-                    TryReadInt32TuningAt(
-                        player2,
-                        offset,
-                        false,
-                        p2Values));
-
-                maybeReport(
-                    "MIDI int32",
-                    offset,
-                    p1Values,
-                    TryReadInt32TuningAt(
-                        player1,
-                        offset,
-                        true,
-                        p1Values),
-                    p2Values,
-                    TryReadInt32TuningAt(
-                        player2,
-                        offset,
-                        true,
-                        p2Values));
-
-                maybeReport(
-                    "int32 cents",
-                    offset,
-                    p1Values,
-                    TryReadInt32CentTuningAt(
-                        player1,
-                        offset,
-                        p1Values),
-                    p2Values,
-                    TryReadInt32CentTuningAt(
-                        player2,
-                        offset,
-                        p2Values));
-
-                maybeReport(
-                    "float frequency",
-                    offset,
-                    p1Values,
-                    TryReadFloatFrequencyTuningAt(
-                        player1,
-                        offset,
-                        p1ReferenceHz,
-                        p1Values),
-                    p2Values,
-                    TryReadFloatFrequencyTuningAt(
-                        player2,
-                        offset,
-                        p2ReferenceHz,
-                        p2Values));
-            }
-
-            if (hits == 0)
-            {
-                log << "  no differing known tuning structures found\n";
-            }
-            else if (hits >= MAX_HITS)
-            {
-                log << "  hit limit reached\n";
-            }
-        }
-
-        void TraceDetectionObjects(
-            std::ostringstream& log)
-        {
-            constexpr std::uintptr_t TRUE_TUNING_FIELD_OFFSET =
-                0x135C;
-            constexpr std::uintptr_t SEARCH_RADIUS =
-                0x04000000;
-
-            log << "PLAYER DETECTION OBJECT SEARCH\n";
-
-            const std::uintptr_t player1 =
-                ResolveConfiguredDetectionObject();
-
-            log << "  known P1 object: "
-                << AddressText(player1)
-                << "\n";
-
-            if (!player1)
-            {
-                log << "  result: P1 detection object unresolved\n\n";
-                return;
-            }
-
-            std::uintptr_t vtable = 0;
-            float player1Reference = 0.0f;
-
-            if (!TryReadValue(player1, vtable) ||
-                !TryReadValue(
-                    player1 + TRUE_TUNING_FIELD_OFFSET,
-                    player1Reference))
-            {
-                log << "  result: P1 object unreadable\n\n";
-                return;
-            }
-
-            log << "  P1 first dword: "
-                << AddressText(vtable)
-                << "\n";
-            log << "  P1 +0x135C: "
-                << player1Reference
-                << "\n";
-
-            const std::uintptr_t minimumAddress =
-                player1 > SEARCH_RADIUS
-                ? player1 - SEARCH_RADIUS
-                : 0x10000;
-
-            const std::uintptr_t maximumAddress =
-                player1 < UINTPTR_MAX - SEARCH_RADIUS
-                ? player1 + SEARCH_RADIUS
-                : UINTPTR_MAX;
-
-            std::vector<std::uintptr_t> candidates;
-            std::uintptr_t cursor = minimumAddress;
-
-            while (cursor < maximumAddress)
-            {
-                MEMORY_BASIC_INFORMATION mbi{};
-
-                if (!VirtualQuery(
-                        reinterpret_cast<const void*>(cursor),
-                        &mbi,
-                        sizeof(mbi)))
-                {
-                    break;
-                }
-
-                const std::uintptr_t regionStart =
-                    reinterpret_cast<std::uintptr_t>(
-                        mbi.BaseAddress);
-                const std::uintptr_t regionEnd =
-                    regionStart +
-                    static_cast<std::uintptr_t>(
-                        mbi.RegionSize);
-
-                const DWORD readable =
-                    PAGE_READONLY |
-                    PAGE_READWRITE |
-                    PAGE_WRITECOPY |
-                    PAGE_EXECUTE_READ |
-                    PAGE_EXECUTE_READWRITE |
-                    PAGE_EXECUTE_WRITECOPY;
-
-                if (mbi.State == MEM_COMMIT &&
-                    mbi.Type == MEM_PRIVATE &&
-                    (mbi.Protect & PAGE_GUARD) == 0 &&
-                    (mbi.Protect & PAGE_NOACCESS) == 0 &&
-                    (mbi.Protect & readable) != 0)
-                {
-                    std::uintptr_t start =
-                        regionStart < minimumAddress
-                        ? minimumAddress
-                        : regionStart;
-                    std::uintptr_t end =
-                        regionEnd > maximumAddress
-                        ? maximumAddress
-                        : regionEnd;
-
-                    start =
-                        (start + 3) &
-                        ~static_cast<std::uintptr_t>(3);
-
-                    for (std::uintptr_t address = start;
-                         address + sizeof(float) <= end;
-                         address += 4)
-                    {
-                        float possibleReference = 0.0f;
-
-                        if (!TryReadValue(
-                                address,
-                                possibleReference) ||
-                            !std::isfinite(possibleReference) ||
-                            possibleReference < 200.0f ||
-                            possibleReference > 500.0f ||
-                            address < TRUE_TUNING_FIELD_OFFSET)
-                        {
-                            continue;
-                        }
-
-                        const std::uintptr_t candidate =
-                            address -
-                            TRUE_TUNING_FIELD_OFFSET;
-
-                        std::uintptr_t candidateVtable = 0;
-
-                        if (!TryReadValue(
-                                candidate,
-                                candidateVtable) ||
-                            candidateVtable != vtable)
-                        {
-                            continue;
-                        }
-
-                        bool duplicate = false;
-
-                        for (const std::uintptr_t existing :
-                             candidates)
-                        {
-                            if (existing == candidate)
-                            {
-                                duplicate = true;
-                                break;
-                            }
-                        }
-
-                        if (!duplicate)
-                        {
-                            candidates.push_back(candidate);
-                        }
-                    }
-                }
-
-                if (regionEnd <= cursor)
-                    break;
-
-                cursor = regionEnd;
-            }
-
-            if (candidates.empty())
-            {
-                log << "  no same-class candidates found within +/-64 MB\n\n";
-                return;
-            }
-
-            int referenceHz =
-                static_cast<int>(
-                    std::round(player1Reference));
-
-            for (size_t i = 0;
-                 i < candidates.size();
-                 ++i)
-            {
-                const std::uintptr_t candidate =
-                    candidates[i];
-
-                float candidateReference = 0.0f;
-                TryReadValue(
-                    candidate + TRUE_TUNING_FIELD_OFFSET,
-                    candidateReference);
-
-                log << "  candidate "
-                    << (i + 1)
-                    << ": "
-                    << AddressText(candidate);
-
-                if (candidate == player1)
-                    log << "  <known P1>";
-
-                log << "  +0x135C="
-                    << candidateReference
-                    << "\n";
-
-                TraceDetectionTuningSignatures(
-                    log,
-                    candidate,
-                    referenceHz);
-            }
-
-            log << "\n";
-        }
-
         bool TryReadArrangementMemory(
             Tuning& tuning)
         {
@@ -2478,49 +1105,49 @@ namespace RocksmithTuning
             return true;
         }
 
-        // Temporary multiplayer diagnostic: capture every call to Rocksmith's
-        // tuning-reference builder. The builder receives the detection object in
-        // ESI and the authored reference cents as its first stack argument. This
-        // identifies the player-specific detection objects without scanning the heap.
+        // Multiplayer chart-target capture.
+        //
+        // The tuning-reference builder receives the player detection object in
+        // ESI. On the arrangement-bearing builder call, stack + 0x20 points to
+        // an arrangement object whose +0x50 field is the authored int32[6]
+        // string tuning. This path was established from a D-standard P1 / E-
+        // standard P2 multiplayer capture, where the two arrays resolved to
+        // [-2,-2,-2,-2,-2,-2] and [0,0,0,0,0,0] respectively.
+        //
+        // The hook only copies a validated six-int target and the detection
+        // identity. No heap scanning or pointer-graph walking occurs in normal
+        // operation.
         constexpr std::uintptr_t REFERENCE_BUILDER_2022 =
             0x004DCCB0;
         constexpr std::uintptr_t REFERENCE_BUILDER_2024_OFFSET =
             0x002AD930;
-        constexpr LONG BUILDER_CAPTURE_SLOTS = 64;
+        constexpr std::uintptr_t BUILDER_CHART_OBJECT_STACK_OFFSET =
+            0x20;
+        constexpr std::uintptr_t BUILDER_CHART_TUNING_OFFSET =
+            0x50;
+        constexpr LONG TARGET_CAPTURE_SLOTS = 16;
         constexpr DWORD TRAP_FLAG = 0x100;
+        constexpr ULONGLONG TARGET_PAIR_MAX_AGE_MS = 5000;
+        constexpr ULONGLONG TARGET_PAIR_MAX_SEPARATION_MS = 250;
 
-        constexpr size_t BUILDER_STACK_DWORDS = 64;
-
-        struct BuilderCapture
+        struct TunerTargetCapture
         {
             volatile LONG sequence = 0;
             std::uintptr_t detection = 0;
-            LONG cents = 0;
+            std::array<int, 6> strings{};
+            LONG playerTag = -1;
             DWORD threadId = 0;
             ULONGLONG tick = 0;
-
-            std::uintptr_t eax = 0;
-            std::uintptr_t ebx = 0;
-            std::uintptr_t ecx = 0;
-            std::uintptr_t edx = 0;
-            std::uintptr_t edi = 0;
-            std::uintptr_t ebp = 0;
-            std::uintptr_t esp = 0;
-            std::uintptr_t eip = 0;
-            DWORD eflags = 0;
-
-            std::array<std::uintptr_t, BUILDER_STACK_DWORDS> stack{};
         };
 
-        BuilderCapture g_builderCaptures[BUILDER_CAPTURE_SLOTS]{};
-        volatile LONG g_builderCaptureCount = 0;
-        LONG g_builderLastDumpSequence = 0;
+        TunerTargetCapture g_targetCaptures[TARGET_CAPTURE_SLOTS]{};
+        volatile LONG g_targetCaptureCount = 0;
 
         std::uintptr_t g_referenceBuilder = 0;
         BYTE g_referenceBuilderOriginalByte = 0;
-        PVOID g_builderVehHandle = nullptr;
-        volatile LONG g_builderHookInstalled = 0;
-        __declspec(thread) LONG g_builderSingleStepActive = 0;
+        PVOID g_targetVehHandle = nullptr;
+        volatile LONG g_targetHookInstalled = 0;
+        __declspec(thread) LONG g_targetSingleStepActive = 0;
 
         std::uintptr_t ResolveReferenceBuilder()
         {
@@ -2542,7 +1169,207 @@ namespace RocksmithTuning
                 REFERENCE_BUILDER_2024_OFFSET;
         }
 
-        LONG CALLBACK ReferenceBuilderVeh(
+        std::uintptr_t ResolvePlayerOneDetectionObject()
+        {
+            constexpr std::array<std::uintptr_t, 3>
+                DETECTION_OBJECT_OFFSETS =
+            {
+                0x10,
+                0x4,
+                0x0
+            };
+
+            return
+                ResolveConfigured(
+                    TRUE_TUNING_2024_ROOT_OFFSET,
+                    TRUE_TUNING_2022_ROOT,
+                    DETECTION_OBJECT_OFFSETS);
+        }
+
+        bool WriteReferenceBuilderByte(
+            BYTE value)
+        {
+            if (!g_referenceBuilder)
+                return false;
+
+            DWORD oldProtect = 0;
+
+            if (!VirtualProtect(
+                    reinterpret_cast<void*>(
+                        g_referenceBuilder),
+                    1,
+                    PAGE_EXECUTE_READWRITE,
+                    &oldProtect))
+            {
+                return false;
+            }
+
+            *reinterpret_cast<volatile BYTE*>(
+                g_referenceBuilder) = value;
+
+            FlushInstructionCache(
+                GetCurrentProcess(),
+                reinterpret_cast<const void*>(
+                    g_referenceBuilder),
+                1);
+
+            DWORD unusedProtect = 0;
+            VirtualProtect(
+                reinterpret_cast<void*>(
+                    g_referenceBuilder),
+                1,
+                oldProtect,
+                &unusedProtect);
+
+            return true;
+        }
+
+        bool TryReadBuilderChartTarget(
+            const CONTEXT* context,
+            std::array<int, 6>& strings,
+            LONG& playerTagOut)
+        {
+#if defined(_M_IX86)
+            if (!context)
+                return false;
+
+            // The exhaustive multiplayer capture identified one specific
+            // builder-call shape that carries the chart tuning. Require that
+            // shape instead of accepting any nearby memory that merely looks
+            // like six sane integers.
+            constexpr std::uintptr_t PLAYER_TAG_STACK_OFFSET = 0x24;
+            constexpr std::uintptr_t STRING_COUNT_STACK_OFFSET = 0x30;
+            constexpr std::uintptr_t PLAYER_TAG_CONFIRM_STACK_OFFSET = 0x48;
+            constexpr std::uintptr_t DIRECT_TUNING_STACK_OFFSET = 0x88;
+
+            std::uintptr_t chartObject = 0;
+            std::uintptr_t directTuning = 0;
+            LONG playerTag = -1;
+            LONG confirmedPlayerTag = -1;
+            LONG stringCount = 0;
+            LONG rawStrings[6] = {};
+
+            __try
+            {
+                chartObject =
+                    *reinterpret_cast<const std::uintptr_t*>(
+                        context->Esp +
+                        BUILDER_CHART_OBJECT_STACK_OFFSET);
+
+                playerTag =
+                    *reinterpret_cast<const LONG*>(
+                        context->Esp +
+                        PLAYER_TAG_STACK_OFFSET);
+
+                stringCount =
+                    *reinterpret_cast<const LONG*>(
+                        context->Esp +
+                        STRING_COUNT_STACK_OFFSET);
+
+                confirmedPlayerTag =
+                    *reinterpret_cast<const LONG*>(
+                        context->Esp +
+                        PLAYER_TAG_CONFIRM_STACK_OFFSET);
+
+                directTuning =
+                    *reinterpret_cast<const std::uintptr_t*>(
+                        context->Esp +
+                        DIRECT_TUNING_STACK_OFFSET);
+
+                if (chartObject == 0 ||
+                    stringCount != 6 ||
+                    playerTag != confirmedPlayerTag ||
+                    (playerTag != 0 && playerTag != 2) ||
+                    directTuning !=
+                        chartObject +
+                        BUILDER_CHART_TUNING_OFFSET)
+                {
+                    return false;
+                }
+
+                for (int i = 0; i < 6; ++i)
+                {
+                    rawStrings[i] =
+                        *reinterpret_cast<const LONG*>(
+                            directTuning +
+                            (i * sizeof(LONG)));
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < 6; ++i)
+            {
+                if (rawStrings[i] < -24 ||
+                    rawStrings[i] > 24)
+                {
+                    return false;
+                }
+
+                strings[i] =
+                    static_cast<int>(
+                        rawStrings[i]);
+            }
+
+            playerTagOut = playerTag;
+            return true;
+#else
+            (void)context;
+            (void)strings;
+            (void)playerTagOut;
+            return false;
+#endif
+        }
+
+        void PublishTargetCapture(
+            const CONTEXT* context)
+        {
+#if defined(_M_IX86)
+            if (!context || context->Esi == 0)
+                return;
+
+            std::array<int, 6> strings{};
+            LONG playerTag = -1;
+
+            if (!TryReadBuilderChartTarget(
+                    context,
+                    strings,
+                    playerTag))
+            {
+                return;
+            }
+
+            const LONG sequence =
+                InterlockedIncrement(
+                    &g_targetCaptureCount);
+
+            TunerTargetCapture& capture =
+                g_targetCaptures[
+                    (sequence - 1) &
+                    (TARGET_CAPTURE_SLOTS - 1)];
+
+            capture.detection =
+                static_cast<std::uintptr_t>(
+                    context->Esi);
+            capture.strings = strings;
+            capture.playerTag = playerTag;
+            capture.threadId =
+                GetCurrentThreadId();
+            capture.tick =
+                GetTickCount64();
+
+            MemoryBarrier();
+            InterlockedExchange(
+                &capture.sequence,
+                sequence);
+#else
+            (void)context;
+#endif
+        }
+
+        LONG CALLBACK TunerTargetBuilderVeh(
             PEXCEPTION_POINTERS exceptionInfo)
         {
 #if defined(_M_IX86)
@@ -2553,11 +1380,11 @@ namespace RocksmithTuning
                 return EXCEPTION_CONTINUE_SEARCH;
             }
 
-            const DWORD code =
-                exceptionInfo->ExceptionRecord->ExceptionCode;
-
             CONTEXT* context =
                 exceptionInfo->ContextRecord;
+
+            const DWORD code =
+                exceptionInfo->ExceptionRecord->ExceptionCode;
 
             if (code == EXCEPTION_BREAKPOINT)
             {
@@ -2571,106 +1398,30 @@ namespace RocksmithTuning
                     return EXCEPTION_CONTINUE_SEARCH;
                 }
 
-                LONG cents = 0;
+                PublishTargetCapture(context);
 
-                __try
+                if (!WriteReferenceBuilderByte(
+                        g_referenceBuilderOriginalByte))
                 {
-                    cents =
-                        *reinterpret_cast<const LONG*>(
-                            context->Esp + sizeof(std::uint32_t));
+                    return EXCEPTION_CONTINUE_SEARCH;
                 }
-                __except(EXCEPTION_EXECUTE_HANDLER)
-                {
-                    cents = 0x7FFFFFFF;
-                }
-
-                const LONG sequence =
-                    InterlockedIncrement(
-                        &g_builderCaptureCount);
-
-                BuilderCapture& capture =
-                    g_builderCaptures[
-                        (sequence - 1) &
-                        (BUILDER_CAPTURE_SLOTS - 1)];
-
-                capture.detection =
-                    static_cast<std::uintptr_t>(
-                        context->Esi);
-                capture.cents = cents;
-                capture.threadId =
-                    GetCurrentThreadId();
-                capture.tick =
-                    GetTickCount64();
-
-                capture.eax = context->Eax;
-                capture.ebx = context->Ebx;
-                capture.ecx = context->Ecx;
-                capture.edx = context->Edx;
-                capture.edi = context->Edi;
-                capture.ebp = context->Ebp;
-                capture.esp = context->Esp;
-                capture.eip = context->Eip;
-                capture.eflags = context->EFlags;
-
-                for (size_t i = 0;
-                     i < BUILDER_STACK_DWORDS;
-                     ++i)
-                {
-                    std::uintptr_t value = 0;
-
-                    __try
-                    {
-                        value =
-                            *reinterpret_cast<const std::uintptr_t*>(
-                                context->Esp +
-                                (i * sizeof(std::uintptr_t)));
-                    }
-                    __except(EXCEPTION_EXECUTE_HANDLER)
-                    {
-                        value = 0;
-                    }
-
-                    capture.stack[i] = value;
-                }
-
-                MemoryBarrier();
-                InterlockedExchange(
-                    &capture.sequence,
-                    sequence);
-
-                *reinterpret_cast<volatile BYTE*>(
-                    g_referenceBuilder) =
-                    g_referenceBuilderOriginalByte;
-
-                FlushInstructionCache(
-                    GetCurrentProcess(),
-                    reinterpret_cast<const void*>(
-                        g_referenceBuilder),
-                    1);
 
                 context->Eip =
                     static_cast<DWORD>(
                         g_referenceBuilder);
                 context->EFlags |= TRAP_FLAG;
-                g_builderSingleStepActive = 1;
+                g_targetSingleStepActive = 1;
 
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
 
             if (code == EXCEPTION_SINGLE_STEP &&
-                g_builderSingleStepActive != 0)
+                g_targetSingleStepActive != 0)
             {
-                *reinterpret_cast<volatile BYTE*>(
-                    g_referenceBuilder) = 0xCC;
-
-                FlushInstructionCache(
-                    GetCurrentProcess(),
-                    reinterpret_cast<const void*>(
-                        g_referenceBuilder),
-                    1);
+                WriteReferenceBuilderByte(0xCC);
 
                 context->EFlags &= ~TRAP_FLAG;
-                g_builderSingleStepActive = 0;
+                g_targetSingleStepActive = 0;
 
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
@@ -2681,13 +1432,13 @@ namespace RocksmithTuning
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        bool InstallReferenceBuilderDiagnostic()
+        bool InstallTunerTargetCapture()
         {
 #if !defined(_M_IX86)
             return false;
 #else
             if (InterlockedCompareExchange(
-                    &g_builderHookInstalled,
+                    &g_targetHookInstalled,
                     0,
                     0) != 0)
             {
@@ -2719,1407 +1470,165 @@ namespace RocksmithTuning
             PVOID handler =
                 AddVectoredExceptionHandler(
                     1,
-                    ReferenceBuilderVeh);
+                    TunerTargetBuilderVeh);
 
             if (!handler)
                 return false;
 
-            DWORD oldProtect = 0;
+            g_referenceBuilder = builder;
+            g_referenceBuilderOriginalByte = original;
+            g_targetVehHandle = handler;
 
-            if (!VirtualProtect(
-                    reinterpret_cast<void*>(builder),
-                    1,
-                    PAGE_EXECUTE_READWRITE,
-                    &oldProtect))
+            if (!WriteReferenceBuilderByte(0xCC))
             {
                 RemoveVectoredExceptionHandler(
                     handler);
+                g_targetVehHandle = nullptr;
+                g_referenceBuilder = 0;
                 return false;
             }
 
-            g_referenceBuilder = builder;
-            g_referenceBuilderOriginalByte =
-                original;
-            g_builderVehHandle = handler;
-
-            *reinterpret_cast<volatile BYTE*>(
-                builder) = 0xCC;
-
-            FlushInstructionCache(
-                GetCurrentProcess(),
-                reinterpret_cast<const void*>(builder),
-                1);
-
             InterlockedExchange(
-                &g_builderHookInstalled,
+                &g_targetHookInstalled,
                 1);
-
-            g_builderLastDumpSequence =
-                InterlockedCompareExchange(
-                    &g_builderCaptureCount,
-                    0,
-                    0);
 
             return true;
 #endif
         }
 
-        bool LooksLikePointerValue(std::uintptr_t value)
+        bool CopyTargetCapture(
+            LONG sequence,
+            TunerTargetCapture& copy)
         {
-            if (value < 0x10000)
+            if (sequence <= 0)
                 return false;
 
-            return IsReadableRange(
-                reinterpret_cast<const void*>(value),
-                sizeof(std::uintptr_t));
-        }
-
-        void AppendContextPointerPreview(
-            std::ostringstream& log,
-            const char* label,
-            std::uintptr_t value)
-        {
-            log << "    " << label << '=' << AddressText(value);
-
-            if (!LooksLikePointerValue(value))
-            {
-                log << "\n";
-                return;
-            }
-
-            std::uintptr_t first = 0;
-            TryReadValue(value, first);
-
-            log << "  readable first="
-                << AddressText(first);
-
-            const std::string directText =
-                ReadString(value, 96);
-
-            if (LooksLikeDiagnosticText(directText))
-            {
-                log << "  text=\""
-                    << directText
-                    << "\"";
-            }
-
-            log << "\n";
-        }
-
-        void AppendBuilderCallContext(
-            std::ostringstream& log,
-            LONG sequence,
-            const BuilderCapture& capture,
-            const char* ownerLabel)
-        {
-            log << "  context event "
-                << sequence
-                << "  "
-                << ownerLabel
-                << "  detection="
-                << AddressText(capture.detection)
-                << " cents=";
-
-            if (capture.cents == 0x7FFFFFFF)
-                log << "<unreadable>";
-            else
-                log << capture.cents;
-
-            log << " thread="
-                << capture.threadId
-                << " tick="
-                << capture.tick;
-
-            if (!capture.stack.empty())
-            {
-                log << " return="
-                    << AddressText(capture.stack[0]);
-            }
-
-            log << " EIP="
-                << AddressText(capture.eip)
-                << " EFLAGS=0x"
-                << std::uppercase
-                << std::hex
-                << capture.eflags
-                << std::dec
-                << "\n";
-
-            AppendContextPointerPreview(log, "EAX", capture.eax);
-            AppendContextPointerPreview(log, "EBX", capture.ebx);
-            AppendContextPointerPreview(log, "ECX", capture.ecx);
-            AppendContextPointerPreview(log, "EDX", capture.edx);
-            AppendContextPointerPreview(log, "ESI", capture.detection);
-            AppendContextPointerPreview(log, "EDI", capture.edi);
-            AppendContextPointerPreview(log, "EBP", capture.ebp);
-            AppendContextPointerPreview(log, "ESP", capture.esp);
-
-            log << "    stack dwords (ESP + offset)\n";
-
-            for (size_t i = 0;
-                 i < capture.stack.size();
-                 ++i)
-            {
-                const std::uintptr_t value =
-                    capture.stack[i];
-
-                char label[32] = {};
-                sprintf_s(
-                    label,
-                    "[+0x%02X]",
-                    static_cast<unsigned int>(
-                        i * sizeof(std::uintptr_t)));
-
-                AppendContextPointerPreview(
-                    log,
-                    label,
-                    value);
-            }
-
-            log << "\n";
-        }
-
-        void TraceContextCandidatePair(
-            std::ostringstream& log,
-            const char* label,
-            std::uintptr_t player1,
-            std::uintptr_t player2)
-        {
-            if (!LooksLikePointerValue(player1) ||
-                !LooksLikePointerValue(player2) ||
-                player1 == player2)
-            {
-                return;
-            }
-
-            log << "  candidate pair "
-                << label
-                << ": P1="
-                << AddressText(player1)
-                << " P2="
-                << AddressText(player2)
-                << "\n";
-
-            TraceDetectionPairTuningDifferences(
-                log,
-                player1,
-                player2);
-        }
-
-        void AppendBuilderContextComparison(
-            std::ostringstream& log,
-            LONG firstSequence,
-            LONG total,
-            std::uintptr_t currentPlayer1)
-        {
-            const BuilderCapture* player1Capture = nullptr;
-            const BuilderCapture* player2Capture = nullptr;
-            LONG player1Sequence = 0;
-            LONG player2Sequence = 0;
-
-            for (LONG sequence = firstSequence;
-                 sequence <= total;
-                 ++sequence)
-            {
-                BuilderCapture& slot =
-                    g_builderCaptures[
-                        (sequence - 1) &
-                        (BUILDER_CAPTURE_SLOTS - 1)];
-
-                if (InterlockedCompareExchange(
-                        &slot.sequence,
-                        0,
-                        0) != sequence)
-                {
-                    continue;
-                }
-
-                if (slot.detection == currentPlayer1)
-                {
-                    if (!player1Capture ||
-                        (player1Capture->cents != 0 &&
-                         slot.cents == 0))
-                    {
-                        player1Capture = &slot;
-                        player1Sequence = sequence;
-                    }
-
-                    continue;
-                }
-
-                if (slot.detection != 0 &&
-                    currentPlayer1 != 0 &&
-                    slot.detection != currentPlayer1)
-                {
-                    if (!player2Capture ||
-                        (player2Capture->cents != 0 &&
-                         slot.cents == 0))
-                    {
-                        player2Capture = &slot;
-                        player2Sequence = sequence;
-                    }
-                }
-            }
-
-            log << "\nBUILDER CALL CONTEXT\n";
-
-            if (!player1Capture)
-            {
-                log << "  no P1 builder context captured\n";
-            }
-            else
-            {
-                AppendBuilderCallContext(
-                    log,
-                    player1Sequence,
-                    *player1Capture,
-                    "<P1>");
-            }
-
-            if (!player2Capture)
-            {
-                log << "  no P2 builder context captured\n\n";
-                return;
-            }
-
-            AppendBuilderCallContext(
-                log,
-                player2Sequence,
-                *player2Capture,
-                "<P2 candidate>");
-
-            if (!player1Capture)
-                return;
-
-            log << "BUILDER CONTEXT P1/P2 POINTER PAIRS\n";
-
-            TraceContextCandidatePair(log, "EAX", player1Capture->eax, player2Capture->eax);
-            TraceContextCandidatePair(log, "EBX", player1Capture->ebx, player2Capture->ebx);
-            TraceContextCandidatePair(log, "ECX", player1Capture->ecx, player2Capture->ecx);
-            TraceContextCandidatePair(log, "EDX", player1Capture->edx, player2Capture->edx);
-            TraceContextCandidatePair(log, "EDI", player1Capture->edi, player2Capture->edi);
-            TraceContextCandidatePair(log, "EBP", player1Capture->ebp, player2Capture->ebp);
-
-            for (size_t i = 0;
-                 i < BUILDER_STACK_DWORDS;
-                 ++i)
-            {
-                char label[32] = {};
-                sprintf_s(
-                    label,
-                    "stack+0x%02X",
-                    static_cast<unsigned int>(
-                        i * sizeof(std::uintptr_t)));
-
-                TraceContextCandidatePair(
-                    log,
-                    label,
-                    player1Capture->stack[i],
-                    player2Capture->stack[i]);
-            }
-
-            log << "\n";
-        }
-
-
-        struct BuilderContextRootPair
-        {
-            std::uintptr_t player1 = 0;
-            std::uintptr_t player2 = 0;
-            std::string label;
-        };
-
-        bool SamePointerPair(
-            const BuilderContextRootPair& pair,
-            std::uintptr_t player1,
-            std::uintptr_t player2)
-        {
-            return pair.player1 == player1 &&
-                pair.player2 == player2;
-        }
-
-        void AddBuilderContextRootPair(
-            std::vector<BuilderContextRootPair>& roots,
-            const std::string& label,
-            std::uintptr_t player1,
-            std::uintptr_t player2)
-        {
-            constexpr size_t MAX_ROOT_PAIRS = 96;
-
-            if (roots.size() >= MAX_ROOT_PAIRS ||
-                player1 == player2 ||
-                !LooksLikePointerValue(player1) ||
-                !LooksLikePointerValue(player2))
-            {
-                return;
-            }
-
-            for (const auto& existing : roots)
-            {
-                if (SamePointerPair(
-                        existing,
-                        player1,
-                        player2))
-                {
-                    return;
-                }
-            }
-
-            BuilderContextRootPair root{};
-            root.player1 = player1;
-            root.player2 = player2;
-            root.label = label;
-            roots.push_back(root);
-        }
-
-        void AppendAllBuilderContexts(
-            std::ostringstream& log,
-            LONG firstSequence,
-            LONG total,
-            std::uintptr_t currentPlayer1)
-        {
-            log << "\nALL BUILDER EVENT CONTEXTS (64 stack dwords each)\n";
-
-            for (LONG sequence = firstSequence;
-                 sequence <= total;
-                 ++sequence)
-            {
-                BuilderCapture& slot =
-                    g_builderCaptures[
-                        (sequence - 1) &
-                        (BUILDER_CAPTURE_SLOTS - 1)];
-
-                if (InterlockedCompareExchange(
-                        &slot.sequence,
-                        0,
-                        0) != sequence)
-                {
-                    continue;
-                }
-
-                const char* owner =
-                    slot.detection == currentPlayer1
-                    ? "<P1>"
-                    : (slot.detection != 0 && currentPlayer1 != 0
-                        ? "<P2/other>"
-                        : "<unknown>");
-
-                AppendBuilderCallContext(
-                    log,
-                    sequence,
-                    slot,
-                    owner);
-            }
-        }
-
-        void AppendUniqueBuilderCallers(
-            std::ostringstream& log,
-            LONG firstSequence,
-            LONG total)
-        {
-            std::vector<std::uintptr_t> callers;
-
-            for (LONG sequence = firstSequence;
-                 sequence <= total;
-                 ++sequence)
-            {
-                BuilderCapture& slot =
-                    g_builderCaptures[
-                        (sequence - 1) &
-                        (BUILDER_CAPTURE_SLOTS - 1)];
-
-                if (InterlockedCompareExchange(
-                        &slot.sequence,
-                        0,
-                        0) != sequence ||
-                    slot.stack.empty())
-                {
-                    continue;
-                }
-
-                const std::uintptr_t caller =
-                    slot.stack[0];
-
-                if (!caller)
-                    continue;
-
-                bool seen = false;
-
-                for (const auto existing : callers)
-                {
-                    if (existing == caller)
-                    {
-                        seen = true;
-                        break;
-                    }
-                }
-
-                if (!seen)
-                    callers.push_back(caller);
-            }
-
-            log << "\nUNIQUE BUILDER CALLERS\n";
-
-            if (callers.empty())
-            {
-                log << "  none\n";
-                return;
-            }
-
-            for (size_t i = 0;
-                 i < callers.size();
-                 ++i)
-            {
-                const std::uintptr_t caller = callers[i];
-                log << "  caller " << (i + 1)
-                    << ": " << AddressText(caller)
-                    << "\n";
-
-                const std::uintptr_t start =
-                    caller >= 16
-                    ? caller - 16
-                    : caller;
-
-                TraceRawBytes(
-                    log,
-                    start,
-                    80);
-            }
-
-            log << "  reference builder bytes\n";
-            TraceRawBytes(
-                log,
-                g_referenceBuilder,
-                96);
-        }
-
-        void ReportPairTuningHit(
-            std::ostringstream& log,
-            const std::string& path,
-            const char* kind,
-            std::uintptr_t offset,
-            const std::array<int, 6>& p1Values,
-            const std::array<int, 6>& p2Values)
-        {
-            const char* p1Key =
-                FindKnownTuningKey(p1Values);
-            const char* p2Key =
-                FindKnownTuningKey(p2Values);
-
-            if (!p1Key || !p2Key ||
-                p1Values == p2Values)
-            {
-                return;
-            }
-
-            log << "    *** TUNING-DIFF "
-                << path
-                << " +"
-                << AddressText(offset)
-                << " "
-                << kind
-                << ": P1="
-                << p1Key
-                << " [";
-
-            for (size_t i = 0;
-                 i < p1Values.size();
-                 ++i)
-            {
-                if (i != 0) log << ',';
-                log << p1Values[i];
-            }
-
-            log << "] P2="
-                << p2Key
-                << " [";
-
-            for (size_t i = 0;
-                 i < p2Values.size();
-                 ++i)
-            {
-                if (i != 0) log << ',';
-                log << p2Values[i];
-            }
-
-            log << "]\n";
-        }
-
-        void ScanPairNodeForTuningDifferences(
-            std::ostringstream& log,
-            const std::string& path,
-            std::uintptr_t player1,
-            std::uintptr_t player2)
-        {
-            constexpr size_t SCAN_BYTES = 0x600;
-            constexpr int BASE_MIDI[6] =
-            {
-                40, 45, 50, 55, 59, 64
-            };
-
-            if (!IsReadableRange(
-                    reinterpret_cast<const void*>(player1),
-                    SCAN_BYTES) ||
-                !IsReadableRange(
-                    reinterpret_cast<const void*>(player2),
-                    SCAN_BYTES))
-            {
-                return;
-            }
-
-            std::array<std::uint8_t, SCAN_BYTES> p1Bytes{};
-            std::array<std::uint8_t, SCAN_BYTES> p2Bytes{};
-
-            std::memcpy(
-                p1Bytes.data(),
-                reinterpret_cast<const void*>(player1),
-                SCAN_BYTES);
-            std::memcpy(
-                p2Bytes.data(),
-                reinterpret_cast<const void*>(player2),
-                SCAN_BYTES);
-
-            auto signedByteTuning =
-                [](const auto& bytes,
-                   size_t offset,
-                   size_t stride,
-                   std::array<int, 6>& values)
-                {
-                    if (offset + (5 * stride) >= bytes.size())
-                        return false;
-
-                    for (size_t i = 0; i < values.size(); ++i)
-                    {
-                        const int value =
-                            static_cast<int>(
-                                static_cast<std::int8_t>(
-                                    bytes[offset + (i * stride)]));
-
-                        if (value < -24 || value > 24)
-                            return false;
-
-                        values[i] = value;
-                    }
-
-                    return true;
-                };
-
-            auto midiByteTuning =
-                [&](const auto& bytes,
-                    size_t offset,
-                    std::array<int, 6>& values)
-                {
-                    if (offset + 6 > bytes.size())
-                        return false;
-
-                    for (size_t i = 0; i < values.size(); ++i)
-                    {
-                        const int value =
-                            static_cast<int>(bytes[offset + i]) -
-                            BASE_MIDI[i];
-
-                        if (value < -24 || value > 24)
-                            return false;
-
-                        values[i] = value;
-                    }
-
-                    return true;
-                };
-
-            auto int16CentsTuning =
-                [](const auto& bytes,
-                   size_t offset,
-                   std::array<int, 6>& values)
-                {
-                    if (offset + (6 * sizeof(std::int16_t)) > bytes.size())
-                        return false;
-
-                    for (size_t i = 0; i < values.size(); ++i)
-                    {
-                        std::int16_t cents = 0;
-                        std::memcpy(
-                            &cents,
-                            bytes.data() + offset +
-                                (i * sizeof(cents)),
-                            sizeof(cents));
-
-                        if (cents < -2400 ||
-                            cents > 2400 ||
-                            (cents % 100) != 0)
-                        {
-                            return false;
-                        }
-
-                        values[i] = cents / 100;
-                    }
-
-                    return true;
-                };
-
-            auto int32Tuning =
-                [&](const auto& bytes,
-                    size_t offset,
-                    bool midi,
-                    std::array<int, 6>& values)
-                {
-                    if (offset + (6 * sizeof(std::int32_t)) > bytes.size())
-                        return false;
-
-                    for (size_t i = 0; i < values.size(); ++i)
-                    {
-                        std::int32_t raw = 0;
-                        std::memcpy(
-                            &raw,
-                            bytes.data() + offset +
-                                (i * sizeof(raw)),
-                            sizeof(raw));
-
-                        const int value =
-                            midi
-                            ? static_cast<int>(raw) - BASE_MIDI[i]
-                            : static_cast<int>(raw);
-
-                        if (value < -24 || value > 24)
-                            return false;
-
-                        values[i] = value;
-                    }
-
-                    return true;
-                };
-
-            auto int32CentsTuning =
-                [](const auto& bytes,
-                   size_t offset,
-                   std::array<int, 6>& values)
-                {
-                    if (offset + (6 * sizeof(std::int32_t)) > bytes.size())
-                        return false;
-
-                    for (size_t i = 0; i < values.size(); ++i)
-                    {
-                        std::int32_t cents = 0;
-                        std::memcpy(
-                            &cents,
-                            bytes.data() + offset +
-                                (i * sizeof(cents)),
-                            sizeof(cents));
-
-                        if (cents < -2400 ||
-                            cents > 2400 ||
-                            (cents % 100) != 0)
-                        {
-                            return false;
-                        }
-
-                        values[i] = cents / 100;
-                    }
-
-                    return true;
-                };
-
-            auto floatFrequencyTuning =
-                [&](const auto& bytes,
-                    size_t offset,
-                    std::array<int, 6>& values)
-                {
-                    if (offset + (6 * sizeof(float)) > bytes.size())
-                        return false;
-
-                    for (size_t i = 0; i < values.size(); ++i)
-                    {
-                        float frequency = 0.0f;
-                        std::memcpy(
-                            &frequency,
-                            bytes.data() + offset +
-                                (i * sizeof(frequency)),
-                            sizeof(frequency));
-
-                        if (!std::isfinite(frequency) ||
-                            frequency < 20.0f ||
-                            frequency > 2000.0f)
-                        {
-                            return false;
-                        }
-
-                        const double midiExact =
-                            69.0 +
-                            12.0 * std::log2(
-                                static_cast<double>(frequency) /
-                                440.0);
-
-                        const int midi =
-                            static_cast<int>(std::round(midiExact));
-
-                        if (std::fabs(
-                                midiExact -
-                                static_cast<double>(midi)) > 0.03)
-                        {
-                            return false;
-                        }
-
-                        const int value =
-                            midi - BASE_MIDI[i];
-
-                        if (value < -24 || value > 24)
-                            return false;
-
-                        values[i] = value;
-                    }
-
-                    return true;
-                };
-
-            for (size_t offset = 0;
-                 offset + 12 <= SCAN_BYTES;
-                 ++offset)
-            {
-                std::array<int, 6> p1Values{};
-                std::array<int, 6> p2Values{};
-
-                if (signedByteTuning(p1Bytes, offset, 1, p1Values) &&
-                    signedByteTuning(p2Bytes, offset, 1, p2Values))
-                {
-                    ReportPairTuningHit(log, path, "signed-byte", offset, p1Values, p2Values);
-                }
-
-                if (signedByteTuning(p1Bytes, offset, 2, p1Values) &&
-                    signedByteTuning(p2Bytes, offset, 2, p2Values))
-                {
-                    ReportPairTuningHit(log, path, "stride-2-byte", offset, p1Values, p2Values);
-                }
-
-                if (midiByteTuning(p1Bytes, offset, p1Values) &&
-                    midiByteTuning(p2Bytes, offset, p2Values))
-                {
-                    ReportPairTuningHit(log, path, "MIDI-byte", offset, p1Values, p2Values);
-                }
-
-                if (int16CentsTuning(p1Bytes, offset, p1Values) &&
-                    int16CentsTuning(p2Bytes, offset, p2Values))
-                {
-                    ReportPairTuningHit(log, path, "int16-cents", offset, p1Values, p2Values);
-                }
-            }
-
-            for (size_t offset = 0;
-                 offset + 24 <= SCAN_BYTES;
-                 offset += 4)
-            {
-                std::array<int, 6> p1Values{};
-                std::array<int, 6> p2Values{};
-
-                if (int32Tuning(p1Bytes, offset, false, p1Values) &&
-                    int32Tuning(p2Bytes, offset, false, p2Values))
-                {
-                    ReportPairTuningHit(log, path, "int32", offset, p1Values, p2Values);
-                }
-
-                if (int32Tuning(p1Bytes, offset, true, p1Values) &&
-                    int32Tuning(p2Bytes, offset, true, p2Values))
-                {
-                    ReportPairTuningHit(log, path, "MIDI-int32", offset, p1Values, p2Values);
-                }
-
-                if (int32CentsTuning(p1Bytes, offset, p1Values) &&
-                    int32CentsTuning(p2Bytes, offset, p2Values))
-                {
-                    ReportPairTuningHit(log, path, "int32-cents", offset, p1Values, p2Values);
-                }
-
-                if (floatFrequencyTuning(p1Bytes, offset, p1Values) &&
-                    floatFrequencyTuning(p2Bytes, offset, p2Values))
-                {
-                    ReportPairTuningHit(log, path, "float-frequency", offset, p1Values, p2Values);
-                }
-            }
-        }
-
-        void ScanPairNodeForStringsAndRawDiffs(
-            std::ostringstream& log,
-            const std::string& path,
-            std::uintptr_t player1,
-            std::uintptr_t player2)
-        {
-            constexpr std::uintptr_t FIELD_BYTES = 0x200;
-            constexpr size_t MAX_STRING_DIFFS = 24;
-            constexpr size_t MAX_RAW_DIFFS = 32;
-
-            size_t stringDiffs = 0;
-            size_t rawDiffs = 0;
-
-            for (std::uintptr_t offset = 0;
-                 offset + sizeof(std::uintptr_t) <= FIELD_BYTES;
-                 offset += sizeof(std::uintptr_t))
-            {
-                std::uintptr_t p1Value = 0;
-                std::uintptr_t p2Value = 0;
-
-                if (!TryReadValue(player1 + offset, p1Value) ||
-                    !TryReadValue(player2 + offset, p2Value) ||
-                    p1Value == p2Value)
-                {
-                    continue;
-                }
-
-                if (rawDiffs < MAX_RAW_DIFFS)
-                {
-                    log << "    RAW-DIFF "
-                        << path
-                        << " +"
-                        << AddressText(offset)
-                        << ": P1="
-                        << AddressText(p1Value)
-                        << " P2="
-                        << AddressText(p2Value);
-
-                    const std::int32_t p1Signed =
-                        static_cast<std::int32_t>(p1Value);
-                    const std::int32_t p2Signed =
-                        static_cast<std::int32_t>(p2Value);
-
-                    if ((p1Signed >= -2400 && p1Signed <= 2400) ||
-                        (p2Signed >= -2400 && p2Signed <= 2400))
-                    {
-                        log << " signed=("
-                            << p1Signed
-                            << ','
-                            << p2Signed
-                            << ')';
-                    }
-
-                    float p1Float = 0.0f;
-                    float p2Float = 0.0f;
-                    TryReadValue(player1 + offset, p1Float);
-                    TryReadValue(player2 + offset, p2Float);
-
-                    if ((std::isfinite(p1Float) && std::fabs(p1Float) < 100000.0f) ||
-                        (std::isfinite(p2Float) && std::fabs(p2Float) < 100000.0f))
-                    {
-                        log << " float=("
-                            << p1Float
-                            << ','
-                            << p2Float
-                            << ')';
-                    }
-
-                    log << "\n";
-                    ++rawDiffs;
-                }
-
-                const bool p1Pointer =
-                    LooksLikePointerValue(p1Value);
-                const bool p2Pointer =
-                    LooksLikePointerValue(p2Value);
-
-                if (stringDiffs < MAX_STRING_DIFFS &&
-                    p1Pointer != p2Pointer)
-                {
-                    const std::uintptr_t pointerValue =
-                        p1Pointer ? p1Value : p2Value;
-                    const std::string pointerText =
-                        ReadString(pointerValue, 128);
-
-                    log << "    ASYMMETRIC-POINTER "
-                        << path
-                        << " +"
-                        << AddressText(offset)
-                        << ": "
-                        << (p1Pointer ? "P1=" : "P2=")
-                        << AddressText(pointerValue);
-
-                    if (LooksLikeDiagnosticText(pointerText))
-                    {
-                        log << " text=\""
-                            << pointerText
-                            << "\"";
-                    }
-
-                    log << "\n";
-                    ++stringDiffs;
-                }
-
-                if (stringDiffs >= MAX_STRING_DIFFS ||
-                    !p1Pointer ||
-                    !p2Pointer)
-                {
-                    continue;
-                }
-
-                const std::string p1Text =
-                    ReadString(p1Value, 128);
-                const std::string p2Text =
-                    ReadString(p2Value, 128);
-
-                if (!LooksLikeDiagnosticText(p1Text) ||
-                    !LooksLikeDiagnosticText(p2Text) ||
-                    p1Text == p2Text)
-                {
-                    continue;
-                }
-
-                Tuning p1Tuning{};
-                Tuning p2Tuning{};
-                const bool p1IsTuning =
-                    TryLookupTuningText(p1Text, p1Tuning);
-                const bool p2IsTuning =
-                    TryLookupTuningText(p2Text, p2Tuning);
-
-                log << "    "
-                    << (p1IsTuning || p2IsTuning
-                        ? "*** TUNING-TEXT-DIFF "
-                        : "STRING-DIFF ")
-                    << path
-                    << " +"
-                    << AddressText(offset)
-                    << ": P1=\""
-                    << p1Text
-                    << "\" P2=\""
-                    << p2Text
-                    << "\"\n";
-
-                ++stringDiffs;
-            }
-        }
-
-        void AppendExhaustiveBuilderPointerGraph(
-            std::ostringstream& log,
-            LONG firstSequence,
-            LONG total,
-            std::uintptr_t currentPlayer1)
-        {
-            constexpr size_t MAX_GRAPH_NODES = 384;
-            constexpr int MAX_GRAPH_DEPTH = 3;
-            constexpr std::uintptr_t CHILD_FIELD_BYTES = 0x200;
-
-            std::vector<const BuilderCapture*> p1Captures;
-            std::vector<const BuilderCapture*> p2Captures;
-
-            for (LONG sequence = firstSequence;
-                 sequence <= total;
-                 ++sequence)
-            {
-                BuilderCapture& slot =
-                    g_builderCaptures[
-                        (sequence - 1) &
-                        (BUILDER_CAPTURE_SLOTS - 1)];
-
-                if (InterlockedCompareExchange(
-                        &slot.sequence,
-                        0,
-                        0) != sequence ||
-                    slot.detection == 0)
-                {
-                    continue;
-                }
-
-                if (slot.detection == currentPlayer1)
-                    p1Captures.push_back(&slot);
-                else if (currentPlayer1 != 0)
-                    p2Captures.push_back(&slot);
-            }
-
-            log << "\nEXHAUSTIVE P1/P2 CONTEXT POINTER GRAPH\n";
-            log << "  depth=" << MAX_GRAPH_DEPTH
-                << " maxNodes=" << MAX_GRAPH_NODES
-                << " scanBytesPerNode=0x600"
-                << " childFields=0x200\n";
-
-            if (p1Captures.empty() || p2Captures.empty())
-            {
-                log << "  insufficient P1/P2 captures for graph search\n";
-                return;
-            }
-
-            std::vector<BuilderContextRootPair> roots;
-
-            for (size_t p1Index = 0;
-                 p1Index < p1Captures.size();
-                 ++p1Index)
-            {
-                for (size_t p2Index = 0;
-                     p2Index < p2Captures.size();
-                     ++p2Index)
-                {
-                    const BuilderCapture& p1 = *p1Captures[p1Index];
-                    const BuilderCapture& p2 = *p2Captures[p2Index];
-
-                    char prefix[64] = {};
-                    sprintf_s(
-                        prefix,
-                        "eventPair[%u,%u]",
-                        static_cast<unsigned int>(p1Index),
-                        static_cast<unsigned int>(p2Index));
-
-                    AddBuilderContextRootPair(roots, std::string(prefix) + "/DETECTION", p1.detection, p2.detection);
-                    AddBuilderContextRootPair(roots, std::string(prefix) + "/EAX", p1.eax, p2.eax);
-                    AddBuilderContextRootPair(roots, std::string(prefix) + "/EBX", p1.ebx, p2.ebx);
-                    AddBuilderContextRootPair(roots, std::string(prefix) + "/ECX", p1.ecx, p2.ecx);
-                    AddBuilderContextRootPair(roots, std::string(prefix) + "/EDX", p1.edx, p2.edx);
-                    AddBuilderContextRootPair(roots, std::string(prefix) + "/EDI", p1.edi, p2.edi);
-                    AddBuilderContextRootPair(roots, std::string(prefix) + "/EBP", p1.ebp, p2.ebp);
-
-                    for (size_t i = 0;
-                         i < BUILDER_STACK_DWORDS;
-                         ++i)
-                    {
-                        char label[96] = {};
-                        sprintf_s(
-                            label,
-                            "%s/STACK+0x%02X",
-                            prefix,
-                            static_cast<unsigned int>(
-                                i * sizeof(std::uintptr_t)));
-
-                        AddBuilderContextRootPair(
-                            roots,
-                            label,
-                            p1.stack[i],
-                            p2.stack[i]);
-                    }
-                }
-            }
-
-            log << "  unique root pairs="
-                << roots.size()
-                << "\n";
-
-            struct GraphNode
-            {
-                std::uintptr_t player1 = 0;
-                std::uintptr_t player2 = 0;
-                int depth = 0;
-                std::string path;
-            };
-
-            std::vector<GraphNode> nodes;
-
-            auto enqueue =
-                [&](std::uintptr_t player1,
-                    std::uintptr_t player2,
-                    int depth,
-                    const std::string& path)
-                {
-                    if (nodes.size() >= MAX_GRAPH_NODES ||
-                        player1 == player2 ||
-                        !LooksLikePointerValue(player1) ||
-                        !LooksLikePointerValue(player2))
-                    {
-                        return;
-                    }
-
-                    for (const auto& existing : nodes)
-                    {
-                        if (existing.player1 == player1 &&
-                            existing.player2 == player2)
-                        {
-                            return;
-                        }
-                    }
-
-                    GraphNode node{};
-                    node.player1 = player1;
-                    node.player2 = player2;
-                    node.depth = depth;
-                    node.path = path;
-                    nodes.push_back(node);
-                };
-
-            for (const auto& root : roots)
-            {
-                enqueue(
-                    root.player1,
-                    root.player2,
-                    0,
-                    root.label);
-            }
-
-            for (size_t cursor = 0;
-                 cursor < nodes.size() &&
-                 cursor < MAX_GRAPH_NODES;
-                 ++cursor)
-            {
-                const GraphNode node = nodes[cursor];
-
-                log << "\n  GRAPH-NODE "
-                    << (cursor + 1)
-                    << " depth="
-                    << node.depth
-                    << " path="
-                    << node.path
-                    << "\n"
-                    << "    P1="
-                    << AddressText(node.player1)
-                    << " P2="
-                    << AddressText(node.player2)
-                    << "\n";
-
-                ScanPairNodeForTuningDifferences(
-                    log,
-                    node.path,
-                    node.player1,
-                    node.player2);
-
-                ScanPairNodeForStringsAndRawDiffs(
-                    log,
-                    node.path,
-                    node.player1,
-                    node.player2);
-
-                if (node.depth >= MAX_GRAPH_DEPTH)
-                    continue;
-
-                for (std::uintptr_t offset = 0;
-                     offset + sizeof(std::uintptr_t) <= CHILD_FIELD_BYTES;
-                     offset += sizeof(std::uintptr_t))
-                {
-                    std::uintptr_t p1Child = 0;
-                    std::uintptr_t p2Child = 0;
-
-                    if (!TryReadValue(node.player1 + offset, p1Child) ||
-                        !TryReadValue(node.player2 + offset, p2Child) ||
-                        p1Child == p2Child ||
-                        !LooksLikePointerValue(p1Child) ||
-                        !LooksLikePointerValue(p2Child))
-                    {
-                        continue;
-                    }
-
-                    char suffix[32] = {};
-                    sprintf_s(
-                        suffix,
-                        "->+0x%03X",
-                        static_cast<unsigned int>(offset));
-
-                    enqueue(
-                        p1Child,
-                        p2Child,
-                        node.depth + 1,
-                        node.path + suffix);
-                }
-            }
-
-            log << "\n  graph nodes visited="
-                << (nodes.size() < MAX_GRAPH_NODES
-                    ? nodes.size()
-                    : MAX_GRAPH_NODES)
-                << "\n";
-
-            if (nodes.size() >= MAX_GRAPH_NODES)
-            {
-                log << "  NOTE: graph node cap reached; root/context data above remains complete\n";
-            }
-        }
-
-        void AppendBuilderCaptureSummary(
-            std::ostringstream& log)
-        {
-            const LONG total =
+            const TunerTargetCapture& source =
+                g_targetCaptures[
+                    (sequence - 1) &
+                    (TARGET_CAPTURE_SLOTS - 1)];
+
+            const LONG publishedBefore =
                 InterlockedCompareExchange(
-                    &g_builderCaptureCount,
+                    const_cast<volatile LONG*>(
+                        &source.sequence),
                     0,
                     0);
 
-            LONG firstSequence =
-                g_builderLastDumpSequence + 1;
+            if (publishedBefore != sequence)
+                return false;
 
-            const LONG oldestAvailable =
-                total >= BUILDER_CAPTURE_SLOTS
-                ? total - BUILDER_CAPTURE_SLOTS + 1
+            copy.detection = source.detection;
+            copy.strings = source.strings;
+            copy.playerTag = source.playerTag;
+            copy.threadId = source.threadId;
+            copy.tick = source.tick;
+
+            MemoryBarrier();
+
+            const LONG publishedAfter =
+                InterlockedCompareExchange(
+                    const_cast<volatile LONG*>(
+                        &source.sequence),
+                    0,
+                    0);
+
+            return publishedAfter == sequence;
+        }
+
+        bool TryReadCapturedTargetPair(
+            Tuning& playerOne,
+            Tuning& playerTwo)
+        {
+            const std::uintptr_t playerOneDetection =
+                ResolvePlayerOneDetectionObject();
+
+            if (!playerOneDetection)
+                return false;
+
+            const LONG lastSequence =
+                InterlockedCompareExchange(
+                    &g_targetCaptureCount,
+                    0,
+                    0);
+
+            if (lastSequence <= 0)
+                return false;
+
+            const ULONGLONG now =
+                GetTickCount64();
+
+            TunerTargetCapture p1{};
+            TunerTargetCapture p2{};
+            bool haveP1 = false;
+            bool haveP2 = false;
+
+            const LONG firstSequence =
+                lastSequence >= TARGET_CAPTURE_SLOTS
+                ? lastSequence - TARGET_CAPTURE_SLOTS + 1
                 : 1;
 
-            if (firstSequence < oldestAvailable)
+            for (LONG sequence = lastSequence;
+                 sequence >= firstSequence;
+                 --sequence)
             {
-                log << "  NOTE: older captures were overwritten; showing newest "
-                    << BUILDER_CAPTURE_SLOTS
-                    << " events\n";
-                firstSequence = oldestAvailable;
-            }
+                TunerTargetCapture candidate{};
 
-            const std::uintptr_t currentPlayer1 =
-                ResolveConfiguredDetectionObject();
-
-            log << "  current P1 detection: "
-                << AddressText(currentPlayer1)
-                << "\n";
-            log << "  captured builder calls since previous F10: "
-                << (total >= firstSequence
-                    ? total - firstSequence + 1
-                    : 0)
-                << "\n";
-
-            struct DetectionSummary
-            {
-                std::uintptr_t detection = 0;
-                LONG lastCents = 0;
-                LONG callCount = 0;
-            };
-
-            std::vector<DetectionSummary> detections;
-
-            for (LONG sequence = firstSequence;
-                 sequence <= total;
-                 ++sequence)
-            {
-                BuilderCapture& slot =
-                    g_builderCaptures[
-                        (sequence - 1) &
-                        (BUILDER_CAPTURE_SLOTS - 1)];
-
-                const LONG published =
-                    InterlockedCompareExchange(
-                        &slot.sequence,
-                        0,
-                        0);
-
-                if (published != sequence)
+                if (!CopyTargetCapture(
+                        sequence,
+                        candidate))
+                {
                     continue;
+                }
 
-                const std::uintptr_t detection =
-                    slot.detection;
-
-                log << "  event "
-                    << sequence
-                    << ": detection="
-                    << AddressText(detection)
-                    << " cents=";
-
-                if (slot.cents == 0x7FFFFFFF)
-                    log << "<unreadable>";
-                else
-                    log << slot.cents;
-
-                log << " thread="
-                    << slot.threadId;
-
-                if (detection == currentPlayer1)
-                    log << "  <current P1>";
-
-                log << "\n";
-
-                bool found = false;
-
-                for (auto& summary : detections)
+                if (candidate.tick > now ||
+                    now - candidate.tick >
+                        TARGET_PAIR_MAX_AGE_MS)
                 {
-                    if (summary.detection == detection)
+                    continue;
+                }
+
+                if (candidate.playerTag == 0 &&
+                    candidate.detection ==
+                        playerOneDetection)
+                {
+                    if (!haveP1)
                     {
-                        summary.lastCents = slot.cents;
-                        ++summary.callCount;
-                        found = true;
-                        break;
+                        p1 = candidate;
+                        haveP1 = true;
                     }
                 }
-
-                if (!found && detection != 0)
+                else if (candidate.playerTag == 2 &&
+                    candidate.detection !=
+                        playerOneDetection &&
+                    !haveP2)
                 {
-                    DetectionSummary summary{};
-                    summary.detection = detection;
-                    summary.lastCents = slot.cents;
-                    summary.callCount = 1;
-                    detections.push_back(summary);
-                }
-            }
-
-            log << "\nUNIQUE DETECTION OBJECTS\n";
-
-            if (detections.empty())
-            {
-                log << "  none captured\n";
-            }
-
-            for (size_t i = 0;
-                 i < detections.size();
-                 ++i)
-            {
-                const auto& summary =
-                    detections[i];
-
-                float reference = 0.0f;
-                TryReadValue(
-                    summary.detection + 0x135C,
-                    reference);
-
-                log << "  object "
-                    << (i + 1)
-                    << ": "
-                    << AddressText(summary.detection)
-                    << " calls="
-                    << summary.callCount
-                    << " lastCents=";
-
-                if (summary.lastCents == 0x7FFFFFFF)
-                    log << "<unreadable>";
-                else
-                    log << summary.lastCents;
-
-                log << " +0x135C="
-                    << reference;
-
-                if (summary.detection == currentPlayer1)
-                    log << "  <current P1>";
-                else if (currentPlayer1 != 0)
-                    log << "  <P2/other candidate>";
-
-                log << "\n";
-
-                int referenceHz =
-                    static_cast<int>(
-                        std::round(reference));
-
-                if (referenceHz < 100 ||
-                    referenceHz > 1000)
-                {
-                    referenceHz = 440;
+                    p2 = candidate;
+                    haveP2 = true;
                 }
 
-                TraceDetectionTuningSignatures(
-                    log,
-                    summary.detection,
-                    referenceHz);
+                if (haveP1 && haveP2)
+                    break;
             }
 
-            if (currentPlayer1 != 0)
+            if (!haveP1 || !haveP2)
+                return false;
+
+            const ULONGLONG separation =
+                p1.tick > p2.tick
+                ? p1.tick - p2.tick
+                : p2.tick - p1.tick;
+
+            if (separation >
+                    TARGET_PAIR_MAX_SEPARATION_MS ||
+                p1.threadId != p2.threadId)
             {
-                for (const auto& summary : detections)
-                {
-                    if (summary.detection == 0 ||
-                        summary.detection == currentPlayer1)
-                    {
-                        continue;
-                    }
-
-                    TraceDetectionPairTuningDifferences(
-                        log,
-                        currentPlayer1,
-                        summary.detection);
-                }
+                return false;
             }
 
-            AppendBuilderContextComparison(
-                log,
-                firstSequence,
-                total,
-                currentPlayer1);
-
-            AppendAllBuilderContexts(
-                log,
-                firstSequence,
-                total,
-                currentPlayer1);
-
-            AppendUniqueBuilderCallers(
-                log,
-                firstSequence,
-                total);
-
-            AppendExhaustiveBuilderPointerGraph(
-                log,
-                firstSequence,
-                total,
-                currentPlayer1);
-
-            g_builderLastDumpSequence = total;
+            playerOne.strings = p1.strings;
+            playerTwo.strings = p2.strings;
+            return true;
         }
 
         const char* NoteNameFromOffset(
@@ -4176,36 +1685,91 @@ namespace RocksmithTuning
                 GAME_SUFFIX) == 0;
     }
 
-    bool TryReadTunerTarget(
-        Tuning& tuning)
+    bool InitializeTunerTargetCapture()
     {
-        return
-            TryReadTunerTextTuning(
-                tuning);
+        return InstallTunerTargetCapture();
     }
 
-    bool CaptureDebugSnapshot()
+    void ShutdownTunerTargetCapture()
     {
-        const bool alreadyInstalled =
-            InterlockedCompareExchange(
-                &g_builderHookInstalled,
+#if defined(_M_IX86)
+        if (InterlockedCompareExchange(
+                &g_targetHookInstalled,
                 0,
-                0) != 0;
+                0) == 0)
+        {
+            return;
+        }
 
-        if (!alreadyInstalled &&
-            !InstallReferenceBuilderDiagnostic())
+        WriteReferenceBuilderByte(
+            g_referenceBuilderOriginalByte);
+
+        if (g_targetVehHandle)
+        {
+            RemoveVectoredExceptionHandler(
+                g_targetVehHandle);
+        }
+
+        g_targetVehHandle = nullptr;
+        g_referenceBuilder = 0;
+        g_targetSingleStepActive = 0;
+
+        InterlockedExchange(
+            &g_targetHookInstalled,
+            0);
+#endif
+    }
+
+    bool TryReadTunerTarget(
+        int player,
+        Tuning& tuning)
+    {
+        if (player < 0 || player > 1)
+            return false;
+
+        // Preserve the proven single-player P1 source exactly. Multiplayer
+        // blanks/repoints that text, so only then do we need the builder pair.
+        if (player == 0 &&
+            TryReadTunerTextTuning(tuning))
+        {
+            return true;
+        }
+
+        Tuning playerOne{};
+        Tuning playerTwo{};
+
+        if (!TryReadCapturedTargetPair(
+                playerOne,
+                playerTwo))
         {
             return false;
         }
 
+        tuning =
+            player == 0
+            ? playerOne
+            : playerTwo;
+
+        return true;
+    }
+
+    bool TryReadTunerTarget(
+        Tuning& tuning)
+    {
+        return TryReadTunerTarget(
+            0,
+            tuning);
+    }
+
+    bool CaptureDebugSnapshot()
+    {
         SYSTEMTIME now{};
         GetLocalTime(&now);
 
         std::ostringstream log;
 
         log << "============================================================\n";
-        log << "RL-Mods tuning-reference builder context diagnostic\n";
-        log << "BUILD: BUILDER_CONTEXT_V2_EXHAUSTIVE\n";
+        log << "RL-Mods multiplayer Auto target capture test\n";
         log << std::setfill('0')
             << std::dec
             << now.wYear << '-'
@@ -4215,85 +1779,49 @@ namespace RocksmithTuning
             << std::setw(2) << now.wMinute << ':'
             << std::setw(2) << now.wSecond
             << "\n";
-        log << "Configured version: "
-            << (GetExecutableVersion() ==
-                    ExecutableVersion::LearnAndPlay2024
-                ? "2024"
-                : "2022")
+        log << "Build: P2_AUTO_TARGET_TEST\n";
+        log << "Current menu: "
+            << CurrentMenuName()
             << "\n";
-        log << "Reference builder: "
-            << AddressText(g_referenceBuilder)
+        log << "Target hook: "
+            << (InterlockedCompareExchange(
+                    &g_targetHookInstalled,
+                    0,
+                    0) != 0
+                ? "installed"
+                : "NOT INSTALLED")
             << "\n";
-        log << "Current menu: ";
+        log << "Captured valid target calls: "
+            << InterlockedCompareExchange(
+                    &g_targetCaptureCount,
+                    0,
+                    0)
+            << "\n";
 
-        const std::string menu =
-            CurrentMenu();
+        Tuning p1{};
+        Tuning p2{};
 
-        log << (menu.empty()
-                ? "<empty/unresolved>"
-                : menu)
-            << "\n\n";
-
-        if (!alreadyInstalled)
+        if (TryReadCapturedTargetPair(p1, p2))
         {
-            log << "BUILDER HOOK ARMED\n";
-            log << "  This first F10 only arms the capture hook.\n";
-            log << "  Enter the MULTIPLAYER pre-song tuner with different P1/P2 arrangements, then press F10 there.\n";
+            log << "P1 captured target: "
+                << VectorText(p1)
+                << " / "
+                << Name(p1)
+                << "\n";
+            log << "P2 captured target: "
+                << VectorText(p2)
+                << " / "
+                << Name(p2)
+                << "\n";
         }
         else
         {
-            AppendBuilderCaptureSummary(
-                log);
-
-            log << "\nNORMAL RL-MODS READERS\n";
-
-            Tuning target{};
-
-            if (TryReadTunerTarget(target))
-            {
-                log << "  TryReadTunerTarget(): "
-                    << VectorText(target)
-                    << " / "
-                    << Name(target)
-                    << "\n";
-            }
-            else
-            {
-                log << "  TryReadTunerTarget(): FAILED\n";
-            }
-
-            Tuning arrangement{};
-
-            if (TryReadArrangement(arrangement))
-            {
-                log << "  TryReadArrangement(): "
-                    << VectorText(arrangement)
-                    << " / "
-                    << Name(arrangement)
-                    << "\n";
-            }
-            else
-            {
-                log << "  TryReadArrangement(): FAILED\n";
-            }
-
-            int referenceHz = 0;
-
-            if (TryReadReferenceHz(referenceHz))
-            {
-                log << "  TryReadReferenceHz(): A"
-                    << referenceHz
-                    << "\n";
-            }
-            else
-            {
-                log << "  TryReadReferenceHz(): FAILED\n";
-            }
+            log << "Captured P1/P2 target pair: unavailable\n";
         }
 
         log << "============================================================\n\n";
 
-        const std::wstring debugPath =
+        const std::wstring path =
             BuildGamePath(
                 L"RLMods_tuning_debug.txt");
 
@@ -4301,27 +1829,25 @@ namespace RocksmithTuning
 
         if (_wfopen_s(
                 &file,
-                debugPath.c_str(),
+                path.c_str(),
                 L"ab") != 0 ||
             !file)
         {
             return false;
         }
 
-        const std::string output =
+        const std::string text =
             log.str();
 
         const size_t written =
             fwrite(
-                output.data(),
+                text.data(),
                 1,
-                output.size(),
+                text.size(),
                 file);
 
         fclose(file);
-
-        return written ==
-            output.size();
+        return written == text.size();
     }
 
     bool TryReadArrangement(

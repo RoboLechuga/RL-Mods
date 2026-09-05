@@ -80,9 +80,8 @@ namespace TuningControl
             bool autoTargetUnavailable = false;
         };
 
-        struct AutoTunerSession
+        struct AutoPlayerSession
         {
-            bool active = false;
             bool targetValid = false;
 
             PlayerState previousPlayer{};
@@ -93,7 +92,13 @@ namespace TuningControl
             int shift = 0;
             int referenceHz =
                 DEFAULT_REFERENCE_HZ;
+        };
 
+        struct AutoTunerSession
+        {
+            bool active = false;
+            bool multiplayer = false;
+            std::array<AutoPlayerSession, MAX_PLAYERS> players{};
             ULONGLONG leftTunerAt = 0;
         };
 
@@ -480,29 +485,21 @@ namespace TuningControl
             return buffer;
         }
 
-        std::string AutoText(
-            bool multiplayer,
-            bool player2Ready)
+        std::string AutoPlayerText(
+            const char* label,
+            const PlayerState& state)
         {
-            const auto& state =
-                g_players[0];
-
-            std::string text =
-                "Mode: Auto\n"
-                "Guitar: ";
-
-            text +=
-                RocksmithTuning::Name(
-                    state.physical);
+            std::string text = label;
+            text += "  Guitar: ";
+            text += RocksmithTuning::Name(
+                state.physical);
 
             text += "\nTarget: ";
             text += ShiftName(state);
 
             text += "\nShift: ";
-            text +=
-                std::to_string(
-                    state.displayShift);
-
+            text += std::to_string(
+                state.displayShift);
             text +=
                 state.displayShift == -1 ||
                 state.displayShift == 1
@@ -510,23 +507,34 @@ namespace TuningControl
                 : " semitones";
 
             text += "\nReference: A";
-            text +=
-                std::to_string(
-                    state.displayReferenceHz);
+            text += std::to_string(
+                state.displayReferenceHz);
+
+            return text;
+        }
+
+        std::string AutoText(
+            bool multiplayer,
+            bool player2Ready)
+        {
+            std::string text = "Mode: Auto\n";
+            text += AutoPlayerText(
+                "P1",
+                g_players[0]);
 
             if (multiplayer)
             {
-                text += "\n\nP2: ";
+                text += "\n\n";
 
-                if (!player2Ready)
+                if (player2Ready)
                 {
-                    text +=
-                        "ASIO input is not ready";
+                    text += AutoPlayerText(
+                        "P2",
+                        g_players[1]);
                 }
                 else
                 {
-                    text +=
-                        "Auto target unavailable";
+                    text += "P2  ASIO input is not ready";
                 }
             }
 
@@ -775,51 +783,59 @@ namespace TuningControl
                     MAX_SHIFT);
         }
 
-        void MarkPlayer2AutoUnavailable()
+        int AutoPlayerCount()
         {
-            if (!AsioPassthrough::
-                    IsPlayerReady(1))
+            return g_autoSession.multiplayer
+                ? MAX_PLAYERS
+                : 1;
+        }
+
+        void BeginAutoTunerSession(
+            bool multiplayer)
+        {
+            g_autoSession = {};
+            g_autoSession.active = true;
+            g_autoSession.multiplayer = multiplayer;
+
+            const int playerCount =
+                multiplayer
+                ? MAX_PLAYERS
+                : 1;
+
+            for (int player = 0;
+                 player < playerCount;
+                 ++player)
+            {
+                g_autoSession.players[player]
+                    .previousPlayer =
+                    g_players[player];
+
+                auto& state =
+                    g_players[player];
+
+                ClearAutoFlags(player);
+                state.autoWaiting = true;
+                state.displayReferenceHz =
+                    state.physicalReferenceHz;
+
+                // A new tuner event must start from the physical guitar signal.
+                // Each player's new virtual shift is applied only after that
+                // player's Rocksmith target has been captured.
+                ApplyPlayerNeutral(player);
+            }
+        }
+
+        void ApplyAutoTunerTarget(
+            int player,
+            const RocksmithTuning::Tuning& target,
+            int referenceHz)
+        {
+            if (player < 0 ||
+                player >= AutoPlayerCount())
             {
                 return;
             }
 
-            auto& player2 =
-                g_players[1];
-
-            ClearAutoFlags(1);
-            player2.autoTargetUnavailable = true;
-            player2.displayReferenceHz =
-                player2.physicalReferenceHz;
-
-            ApplyPlayerNeutral(1);
-        }
-
-        void BeginAutoTunerSession()
-        {
-            g_autoSession = {};
-            g_autoSession.active = true;
-            g_autoSession.previousPlayer =
-                g_players[0];
-
-            auto& player1 =
-                g_players[0];
-
-            ClearAutoFlags(0);
-            player1.autoWaiting = true;
-            player1.displayReferenceHz =
-                player1.physicalReferenceHz;
-
-            // Do not carry the previous song's virtual shift into a new tuner
-            // while the new target text is still being populated.
-            ApplyPlayerNeutral(0);
-
-            MarkPlayer2AutoUnavailable();
-        }
-
-        void ApplyAutoTunerTarget(
-            const RocksmithTuning::Tuning& target,
-            int referenceHz)
-        {
             const int shift =
                 ChooseAutoShift(target);
 
@@ -828,47 +844,47 @@ namespace TuningControl
                     target,
                     -shift);
 
-            g_autoSession.target = target;
-            g_autoSession.requiredPhysical =
+            auto& session =
+                g_autoSession.players[player];
+
+            session.target = target;
+            session.requiredPhysical =
                 requiredPhysical;
-            g_autoSession.shift = shift;
-            g_autoSession.referenceHz =
+            session.shift = shift;
+            session.referenceHz =
                 referenceHz;
-            g_autoSession.targetValid = true;
+            session.targetValid = true;
             g_autoSession.leftTunerAt = 0;
 
-            auto& player1 =
-                g_players[0];
+            auto& state =
+                g_players[player];
 
-            ClearAutoFlags(0);
+            ClearAutoFlags(player);
 
-            // What the player must physically tune the guitar to after the
-            // global virtual shift is removed from the Rocksmith target.
-            player1.physical =
+            // Rocksmith's tuner remains the authority for any residual physical
+            // retune after the player's global virtual shift is removed.
+            state.physical =
                 requiredPhysical;
-            player1.physicalReferenceHz =
+            state.physicalReferenceHz =
                 DEFAULT_REFERENCE_HZ;
 
             ApplyPlayerTarget(
-                0,
+                player,
                 shift,
                 referenceHz);
 
-            MarkPlayer2AutoUnavailable();
-
             std::string notice =
-                "Auto target: ";
-            notice +=
-                RocksmithTuning::Name(target);
-            notice +=
-                " | Guitar: ";
-            notice +=
-                RocksmithTuning::Name(
-                    requiredPhysical);
-            notice +=
-                " | Shift: ";
-            notice +=
-                std::to_string(shift);
+                "Auto target: P";
+            notice += std::to_string(
+                player + 1);
+            notice += " ";
+            notice += RocksmithTuning::Name(
+                target);
+            notice += " | Guitar: ";
+            notice += RocksmithTuning::Name(
+                requiredPhysical);
+            notice += " | Shift: ";
+            notice += std::to_string(shift);
 
             SetNotice(notice);
         }
@@ -878,48 +894,59 @@ namespace TuningControl
             if (!g_autoSession.active)
                 return;
 
-            auto& player1 =
-                g_players[0];
+            std::string notice =
+                "Auto locked:";
 
-            if (g_autoSession.targetValid)
+            const int playerCount =
+                AutoPlayerCount();
+
+            for (int player = 0;
+                 player < playerCount;
+                 ++player)
             {
-                // Rocksmith only advances from the tuner after the effective
-                // tuning passes. Therefore target - virtual shift is now the
-                // confirmed physical topology of the guitar.
-                player1.physical =
-                    g_autoSession.requiredPhysical;
-                player1.physicalReferenceHz =
-                    DEFAULT_REFERENCE_HZ;
-                player1.manualShift = 0;
-                player1.manualReferenceHz =
-                    DEFAULT_REFERENCE_HZ;
+                auto& state =
+                    g_players[player];
+                const auto& session =
+                    g_autoSession.players[player];
 
-                ClearAutoFlags(0);
+                if (session.targetValid)
+                {
+                    // Advancing from the tuner into gameplay confirms that
+                    // Rocksmith accepted this player's effective tuning.
+                    state.physical =
+                        session.requiredPhysical;
+                    state.physicalReferenceHz =
+                        DEFAULT_REFERENCE_HZ;
+                    state.manualShift = 0;
+                    state.manualReferenceHz =
+                        DEFAULT_REFERENCE_HZ;
 
-                std::string notice =
-                    "Auto locked: ";
-                notice +=
-                    RocksmithTuning::Name(
-                        g_autoSession.target);
-                notice +=
-                    " | Shift: ";
-                notice +=
-                    std::to_string(
-                        g_autoSession.shift);
+                    ClearAutoFlags(player);
 
-                SetNotice(notice);
+                    notice += " P";
+                    notice += std::to_string(
+                        player + 1);
+                    notice += " ";
+                    notice += RocksmithTuning::Name(
+                        session.target);
+                    notice += " (";
+                    notice += std::to_string(
+                        session.shift);
+                    notice += ")";
+                }
+                else
+                {
+                    ClearAutoFlags(player);
+                    state.retuneRequired = true;
+
+                    notice += " P";
+                    notice += std::to_string(
+                        player + 1);
+                    notice += " target unavailable";
+                }
             }
-            else
-            {
-                // Unknown/custom tuner text: stay neutral and let Rocksmith's
-                // tuner be the authority. Future Auto decisions do not depend
-                // on this remembered topology.
-                ClearAutoFlags(0);
-                player1.retuneRequired = true;
-                SetNotice(
-                    "Auto bypassed unknown/custom tuning");
-            }
 
+            SetNotice(notice);
             g_autoSession = {};
         }
 
@@ -928,22 +955,31 @@ namespace TuningControl
             if (!g_autoSession.active)
                 return;
 
-            const PlayerState previous =
-                g_autoSession.previousPlayer;
+            const int playerCount =
+                AutoPlayerCount();
 
-            g_players[0] = previous;
+            for (int player = 0;
+                 player < playerCount;
+                 ++player)
+            {
+                const PlayerState previous =
+                    g_autoSession.players[player]
+                        .previousPlayer;
 
-            AsioPassthrough::SetPlayerRatio(
-                0,
-                RatioForRelativeTarget(
-                    previous.displayShift,
-                    previous.displayReferenceHz,
-                    previous.physicalReferenceHz));
+                g_players[player] = previous;
+
+                AsioPassthrough::SetPlayerRatio(
+                    player,
+                    RatioForRelativeTarget(
+                        previous.displayShift,
+                        previous.displayReferenceHz,
+                        previous.physicalReferenceHz));
+            }
 
             g_autoSession = {};
 
             SetNotice(
-                "Tuner cancelled; previous shift restored");
+                "Tuner cancelled; previous shifts restored");
         }
 
         void ResetAutoState()
@@ -961,12 +997,9 @@ namespace TuningControl
                     g_players[player]
                         .physicalReferenceHz;
                 ApplyPlayerNeutral(player);
+                g_players[player]
+                    .autoWaiting = true;
             }
-
-            g_players[0]
-                .autoWaiting = true;
-
-            MarkPlayer2AutoUnavailable();
         }
 
         bool UpdateAuto()
@@ -997,8 +1030,6 @@ namespace TuningControl
             if (menu.empty())
                 return false;
 
-            // SelectionListDialog is generic and can be used outside a real
-            // pre-song tuner, so do not let it start an Auto session by itself.
             const bool inPreSongTuner =
                 menu != "SelectionListDialog" &&
                 RocksmithTuning::
@@ -1010,32 +1041,47 @@ namespace TuningControl
             {
                 if (!g_autoSession.active)
                 {
-                    BeginAutoTunerSession();
+                    BeginAutoTunerSession(
+                        IsRocksmithMultiplayer());
                     changed = true;
                 }
 
                 g_autoSession.leftTunerAt = 0;
 
-                RocksmithTuning::Tuning target{};
+                int referenceHz =
+                    DEFAULT_REFERENCE_HZ;
 
-                if (RocksmithTuning::
-                        TryReadTunerTarget(
-                            target))
+                RocksmithTuning::
+                    TryReadReferenceHz(
+                        referenceHz);
+
+                const int playerCount =
+                    AutoPlayerCount();
+
+                for (int player = 0;
+                     player < playerCount;
+                     ++player)
                 {
-                    int referenceHz =
-                        DEFAULT_REFERENCE_HZ;
+                    RocksmithTuning::Tuning target{};
 
-                    RocksmithTuning::
-                        TryReadReferenceHz(
-                            referenceHz);
+                    if (!RocksmithTuning::
+                            TryReadTunerTarget(
+                                player,
+                                target))
+                    {
+                        continue;
+                    }
 
-                    if (!g_autoSession.targetValid ||
-                        target !=
-                            g_autoSession.target ||
+                    const auto& session =
+                        g_autoSession.players[player];
+
+                    if (!session.targetValid ||
+                        target != session.target ||
                         referenceHz !=
-                            g_autoSession.referenceHz)
+                            session.referenceHz)
                     {
                         ApplyAutoTunerTarget(
+                            player,
                             target,
                             referenceHz);
 
@@ -1048,9 +1094,8 @@ namespace TuningControl
 
             if (!g_autoSession.active)
             {
-                // No tuner event: keep the current virtual shift exactly as-is.
-                // This is essential when Nonstop Play skips a tuner because
-                // Rocksmith believes the effective tuning has not changed.
+                // No tuner event: keep each player's current virtual shift.
+                // Nonstop Play can intentionally skip the tuner between songs.
                 return false;
             }
 
@@ -1067,8 +1112,6 @@ namespace TuningControl
                 return false;
             }
 
-            // Give loading/intermediate menus time to resolve to *_Game. If the
-            // player backed out of the tuner instead, restore the previous shift.
             if (now -
                     g_autoSession.leftTunerAt >=
                 AUTO_CANCEL_GRACE_MS)
@@ -1440,6 +1483,8 @@ namespace TuningControl
 
     bool Initialize()
     {
+        RocksmithTuning::InitializeTunerTargetCapture();
+
         ApplyAllManual();
         CreateOverlay();
 
@@ -1548,6 +1593,8 @@ namespace TuningControl
 
     void Shutdown()
     {
+        RocksmithTuning::ShutdownTunerTargetCapture();
+
         if (g_overlay)
         {
             DestroyWindow(g_overlay);
