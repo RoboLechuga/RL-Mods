@@ -1127,7 +1127,6 @@ namespace RocksmithTuning
             0x50;
         constexpr LONG TARGET_CAPTURE_SLOTS = 16;
         constexpr DWORD TRAP_FLAG = 0x100;
-        constexpr ULONGLONG TARGET_PAIR_MAX_AGE_MS = 5000;
         constexpr ULONGLONG TARGET_PAIR_MAX_SEPARATION_MS = 250;
 
         struct TunerTargetCapture
@@ -1540,12 +1539,6 @@ namespace RocksmithTuning
             Tuning& playerOne,
             Tuning& playerTwo)
         {
-            const std::uintptr_t playerOneDetection =
-                ResolvePlayerOneDetectionObject();
-
-            if (!playerOneDetection)
-                return false;
-
             const LONG lastSequence =
                 InterlockedCompareExchange(
                     &g_targetCaptureCount,
@@ -1554,9 +1547,6 @@ namespace RocksmithTuning
 
             if (lastSequence <= 0)
                 return false;
-
-            const ULONGLONG now =
-                GetTickCount64();
 
             TunerTargetCapture p1{};
             TunerTargetCapture p2{};
@@ -1581,16 +1571,12 @@ namespace RocksmithTuning
                     continue;
                 }
 
-                if (candidate.tick > now ||
-                    now - candidate.tick >
-                        TARGET_PAIR_MAX_AGE_MS)
-                {
-                    continue;
-                }
-
-                if (candidate.playerTag == 0 &&
-                    candidate.detection ==
-                        playerOneDetection)
+                // The arrangement-bearing builder call itself identifies the
+                // player: the validated call shape carries tag 0 for Player 1
+                // and tag 2 for Player 2. Do not add a second dependency on
+                // the separately resolved true-tuning pointer; that pointer can
+                // legitimately move while the captured target remains valid.
+                if (candidate.playerTag == 0)
                 {
                     if (!haveP1)
                     {
@@ -1599,8 +1585,6 @@ namespace RocksmithTuning
                     }
                 }
                 else if (candidate.playerTag == 2 &&
-                    candidate.detection !=
-                        playerOneDetection &&
                     !haveP2)
                 {
                     p2 = candidate;
@@ -1797,6 +1781,42 @@ namespace RocksmithTuning
                     0,
                     0)
             << "\n";
+
+        const LONG lastSequence =
+            InterlockedCompareExchange(
+                &g_targetCaptureCount,
+                0,
+                0);
+
+        const LONG firstSequence =
+            lastSequence >= TARGET_CAPTURE_SLOTS
+            ? lastSequence - TARGET_CAPTURE_SLOTS + 1
+            : 1;
+
+        for (LONG sequence = firstSequence;
+             sequence <= lastSequence;
+             ++sequence)
+        {
+            TunerTargetCapture capture{};
+
+            if (!CopyTargetCapture(sequence, capture))
+                continue;
+
+            Tuning captured{};
+            captured.strings = capture.strings;
+
+            log << "  capture " << sequence
+                << ": tag=" << capture.playerTag
+                << " detection=0x"
+                << std::hex << std::uppercase
+                << capture.detection
+                << std::dec
+                << " thread=" << capture.threadId
+                << " tick=" << capture.tick
+                << " target=" << VectorText(captured)
+                << " / " << Name(captured)
+                << "\n";
+        }
 
         Tuning p1{};
         Tuning p2{};
