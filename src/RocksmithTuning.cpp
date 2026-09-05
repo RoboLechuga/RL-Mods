@@ -1281,6 +1281,642 @@ namespace RocksmithTuning
                 true);
         }
 
+        std::uintptr_t ResolveConfiguredDetectionObject()
+        {
+            HMODULE gameModule =
+                GetModuleHandleW(nullptr);
+
+            if (!gameModule)
+                return 0;
+
+            const std::uintptr_t base =
+                reinterpret_cast<std::uintptr_t>(
+                    gameModule);
+
+            const std::uintptr_t rootOffset =
+                GetExecutableVersion() ==
+                    ExecutableVersion::LearnAndPlay2024
+                ? TRUE_TUNING_2024_ROOT_OFFSET
+                : TRUE_TUNING_2022_ROOT;
+
+            std::uintptr_t address =
+                base + rootOffset;
+
+            std::uintptr_t next = 0;
+
+            if (!TryReadValue(address, next) ||
+                next == 0)
+            {
+                return 0;
+            }
+
+            address = next + 0x10;
+
+            if (!TryReadValue(address, next) ||
+                next == 0)
+            {
+                return 0;
+            }
+
+            address = next + 0x4;
+
+            if (!TryReadValue(address, next) ||
+                next == 0)
+            {
+                return 0;
+            }
+
+            return next;
+        }
+
+        const char* FindKnownTuningKey(
+            const std::array<int, 6>& values)
+        {
+            for (const auto& definition :
+                 TUNING_DEFINITIONS)
+            {
+                if (values == definition.strings)
+                    return definition.key;
+            }
+
+            return nullptr;
+        }
+
+        bool IsAllZeroTuning(
+            const std::array<int, 6>& values)
+        {
+            for (const int value : values)
+            {
+                if (value != 0)
+                    return false;
+            }
+
+            return true;
+        }
+
+        void TraceDetectionTuningSignatures(
+            std::ostringstream& log,
+            std::uintptr_t object,
+            int referenceHz)
+        {
+            constexpr std::uintptr_t SCAN_BYTES = 0x1800;
+            constexpr int BASE_MIDI[6] =
+            {
+                40, 45, 50, 55, 59, 64
+            };
+            constexpr size_t MAX_HITS = 32;
+
+            size_t hits = 0;
+
+            auto report =
+                [&](const char* kind,
+                    std::uintptr_t offset,
+                    const std::array<int, 6>& tuning,
+                    const char* key)
+                {
+                    if (hits >= MAX_HITS)
+                        return;
+
+                    log << "    "
+                        << kind
+                        << " at +"
+                        << AddressText(offset)
+                        << ": [";
+
+                    for (size_t i = 0;
+                         i < tuning.size();
+                         ++i)
+                    {
+                        if (i != 0)
+                            log << ',';
+
+                        log << tuning[i];
+                    }
+
+                    log << "]  "
+                        << key
+                        << "\n";
+
+                    ++hits;
+                };
+
+            for (std::uintptr_t offset = 0;
+                 offset + 12 <= SCAN_BYTES &&
+                 hits < MAX_HITS;
+                 ++offset)
+            {
+                std::array<int, 6> values{};
+                bool valid = true;
+
+                for (size_t i = 0;
+                     i < values.size();
+                     ++i)
+                {
+                    std::uint8_t raw = 0;
+
+                    if (!TryReadValue(
+                            object + offset + i,
+                            raw))
+                    {
+                        valid = false;
+                        break;
+                    }
+
+                    values[i] =
+                        static_cast<int>(
+                            static_cast<std::int8_t>(
+                                raw));
+
+                    if (values[i] < -24 ||
+                        values[i] > 24)
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                if (valid &&
+                    !IsAllZeroTuning(values))
+                {
+                    const char* key =
+                        FindKnownTuningKey(values);
+
+                    if (key)
+                    {
+                        report(
+                            "signed-byte tuning",
+                            offset,
+                            values,
+                            key);
+                    }
+                }
+
+                valid = true;
+
+                for (size_t i = 0;
+                     i < values.size();
+                     ++i)
+                {
+                    std::uint8_t raw = 0;
+
+                    if (!TryReadValue(
+                            object + offset +
+                                (i * 2),
+                            raw))
+                    {
+                        valid = false;
+                        break;
+                    }
+
+                    values[i] =
+                        static_cast<int>(
+                            static_cast<std::int8_t>(
+                                raw));
+
+                    if (values[i] < -24 ||
+                        values[i] > 24)
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                if (valid &&
+                    !IsAllZeroTuning(values))
+                {
+                    const char* key =
+                        FindKnownTuningKey(values);
+
+                    if (key)
+                    {
+                        report(
+                            "stride-2 tuning",
+                            offset,
+                            values,
+                            key);
+                    }
+                }
+
+                valid = true;
+
+                for (size_t i = 0;
+                     i < values.size();
+                     ++i)
+                {
+                    std::uint8_t raw = 0;
+
+                    if (!TryReadValue(
+                            object + offset + i,
+                            raw))
+                    {
+                        valid = false;
+                        break;
+                    }
+
+                    values[i] =
+                        static_cast<int>(raw) -
+                        BASE_MIDI[i];
+
+                    if (values[i] < -24 ||
+                        values[i] > 24)
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                if (valid)
+                {
+                    const char* key =
+                        FindKnownTuningKey(values);
+
+                    if (key)
+                    {
+                        report(
+                            "MIDI-byte tuning",
+                            offset,
+                            values,
+                            key);
+                    }
+                }
+            }
+
+            for (std::uintptr_t offset = 0;
+                 offset + 24 <= SCAN_BYTES &&
+                 hits < MAX_HITS;
+                 offset += 4)
+            {
+                std::array<int, 6> values{};
+                bool valid = true;
+
+                for (size_t i = 0;
+                     i < values.size();
+                     ++i)
+                {
+                    std::int32_t raw = 0;
+
+                    if (!TryReadValue(
+                            object + offset +
+                                (i * sizeof(raw)),
+                            raw))
+                    {
+                        valid = false;
+                        break;
+                    }
+
+                    if (raw < -24 ||
+                        raw > 24)
+                    {
+                        valid = false;
+                        break;
+                    }
+
+                    values[i] =
+                        static_cast<int>(raw);
+                }
+
+                if (valid &&
+                    !IsAllZeroTuning(values))
+                {
+                    const char* key =
+                        FindKnownTuningKey(values);
+
+                    if (key)
+                    {
+                        report(
+                            "int32 tuning",
+                            offset,
+                            values,
+                            key);
+                    }
+                }
+
+                valid = true;
+
+                for (size_t i = 0;
+                     i < values.size();
+                     ++i)
+                {
+                    std::int32_t raw = 0;
+
+                    if (!TryReadValue(
+                            object + offset +
+                                (i * sizeof(raw)),
+                            raw))
+                    {
+                        valid = false;
+                        break;
+                    }
+
+                    values[i] =
+                        static_cast<int>(raw) -
+                        BASE_MIDI[i];
+
+                    if (values[i] < -24 ||
+                        values[i] > 24)
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                if (valid)
+                {
+                    const char* key =
+                        FindKnownTuningKey(values);
+
+                    if (key)
+                    {
+                        report(
+                            "MIDI-int32 tuning",
+                            offset,
+                            values,
+                            key);
+                    }
+                }
+
+                if (referenceHz <= 0)
+                    continue;
+
+                valid = true;
+
+                for (size_t i = 0;
+                     i < values.size();
+                     ++i)
+                {
+                    float frequency = 0.0f;
+
+                    if (!TryReadValue(
+                            object + offset +
+                                (i * sizeof(float)),
+                            frequency) ||
+                        !std::isfinite(frequency) ||
+                        frequency < 20.0f ||
+                        frequency > 2000.0f)
+                    {
+                        valid = false;
+                        break;
+                    }
+
+                    const double midiExact =
+                        69.0 +
+                        12.0 *
+                            std::log2(
+                                static_cast<double>(frequency) /
+                                static_cast<double>(referenceHz));
+
+                    const int midi =
+                        static_cast<int>(
+                            std::round(midiExact));
+
+                    if (std::fabs(
+                            midiExact -
+                            static_cast<double>(midi)) >
+                        0.03)
+                    {
+                        valid = false;
+                        break;
+                    }
+
+                    values[i] =
+                        midi -
+                        BASE_MIDI[i];
+
+                    if (values[i] < -24 ||
+                        values[i] > 24)
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+
+                if (valid)
+                {
+                    const char* key =
+                        FindKnownTuningKey(values);
+
+                    if (key)
+                    {
+                        report(
+                            "float-frequency tuning",
+                            offset,
+                            values,
+                            key);
+                    }
+                }
+            }
+
+            if (hits == 0)
+            {
+                log << "    no known tuning signatures found\n";
+            }
+            else if (hits >= MAX_HITS)
+            {
+                log << "    hit limit reached\n";
+            }
+        }
+
+        void TraceDetectionObjects(
+            std::ostringstream& log)
+        {
+            constexpr std::uintptr_t TRUE_TUNING_FIELD_OFFSET =
+                0x135C;
+            constexpr std::uintptr_t SEARCH_RADIUS =
+                0x04000000;
+
+            log << "PLAYER DETECTION OBJECT SEARCH\n";
+
+            const std::uintptr_t player1 =
+                ResolveConfiguredDetectionObject();
+
+            log << "  known P1 object: "
+                << AddressText(player1)
+                << "\n";
+
+            if (!player1)
+            {
+                log << "  result: P1 detection object unresolved\n\n";
+                return;
+            }
+
+            std::uintptr_t vtable = 0;
+            float player1Reference = 0.0f;
+
+            if (!TryReadValue(player1, vtable) ||
+                !TryReadValue(
+                    player1 + TRUE_TUNING_FIELD_OFFSET,
+                    player1Reference))
+            {
+                log << "  result: P1 object unreadable\n\n";
+                return;
+            }
+
+            log << "  P1 first dword: "
+                << AddressText(vtable)
+                << "\n";
+            log << "  P1 +0x135C: "
+                << player1Reference
+                << "\n";
+
+            const std::uintptr_t minimumAddress =
+                player1 > SEARCH_RADIUS
+                ? player1 - SEARCH_RADIUS
+                : 0x10000;
+
+            const std::uintptr_t maximumAddress =
+                player1 < UINTPTR_MAX - SEARCH_RADIUS
+                ? player1 + SEARCH_RADIUS
+                : UINTPTR_MAX;
+
+            std::vector<std::uintptr_t> candidates;
+            std::uintptr_t cursor = minimumAddress;
+
+            while (cursor < maximumAddress)
+            {
+                MEMORY_BASIC_INFORMATION mbi{};
+
+                if (!VirtualQuery(
+                        reinterpret_cast<const void*>(cursor),
+                        &mbi,
+                        sizeof(mbi)))
+                {
+                    break;
+                }
+
+                const std::uintptr_t regionStart =
+                    reinterpret_cast<std::uintptr_t>(
+                        mbi.BaseAddress);
+                const std::uintptr_t regionEnd =
+                    regionStart +
+                    static_cast<std::uintptr_t>(
+                        mbi.RegionSize);
+
+                const DWORD readable =
+                    PAGE_READONLY |
+                    PAGE_READWRITE |
+                    PAGE_WRITECOPY |
+                    PAGE_EXECUTE_READ |
+                    PAGE_EXECUTE_READWRITE |
+                    PAGE_EXECUTE_WRITECOPY;
+
+                if (mbi.State == MEM_COMMIT &&
+                    mbi.Type == MEM_PRIVATE &&
+                    (mbi.Protect & PAGE_GUARD) == 0 &&
+                    (mbi.Protect & PAGE_NOACCESS) == 0 &&
+                    (mbi.Protect & readable) != 0)
+                {
+                    std::uintptr_t start =
+                        regionStart < minimumAddress
+                        ? minimumAddress
+                        : regionStart;
+                    std::uintptr_t end =
+                        regionEnd > maximumAddress
+                        ? maximumAddress
+                        : regionEnd;
+
+                    start =
+                        (start + 3) &
+                        ~static_cast<std::uintptr_t>(3);
+
+                    for (std::uintptr_t address = start;
+                         address + sizeof(float) <= end;
+                         address += 4)
+                    {
+                        float possibleReference = 0.0f;
+
+                        if (!TryReadValue(
+                                address,
+                                possibleReference) ||
+                            !std::isfinite(possibleReference) ||
+                            possibleReference < 200.0f ||
+                            possibleReference > 500.0f ||
+                            address < TRUE_TUNING_FIELD_OFFSET)
+                        {
+                            continue;
+                        }
+
+                        const std::uintptr_t candidate =
+                            address -
+                            TRUE_TUNING_FIELD_OFFSET;
+
+                        std::uintptr_t candidateVtable = 0;
+
+                        if (!TryReadValue(
+                                candidate,
+                                candidateVtable) ||
+                            candidateVtable != vtable)
+                        {
+                            continue;
+                        }
+
+                        bool duplicate = false;
+
+                        for (const std::uintptr_t existing :
+                             candidates)
+                        {
+                            if (existing == candidate)
+                            {
+                                duplicate = true;
+                                break;
+                            }
+                        }
+
+                        if (!duplicate)
+                        {
+                            candidates.push_back(candidate);
+                        }
+                    }
+                }
+
+                if (regionEnd <= cursor)
+                    break;
+
+                cursor = regionEnd;
+            }
+
+            if (candidates.empty())
+            {
+                log << "  no same-class candidates found within +/-64 MB\n\n";
+                return;
+            }
+
+            int referenceHz =
+                static_cast<int>(
+                    std::round(player1Reference));
+
+            for (size_t i = 0;
+                 i < candidates.size();
+                 ++i)
+            {
+                const std::uintptr_t candidate =
+                    candidates[i];
+
+                float candidateReference = 0.0f;
+                TryReadValue(
+                    candidate + TRUE_TUNING_FIELD_OFFSET,
+                    candidateReference);
+
+                log << "  candidate "
+                    << (i + 1)
+                    << ": "
+                    << AddressText(candidate);
+
+                if (candidate == player1)
+                    log << "  <known P1>";
+
+                log << "  +0x135C="
+                    << candidateReference
+                    << "\n";
+
+                TraceDetectionTuningSignatures(
+                    log,
+                    candidate,
+                    referenceHz);
+            }
+
+            log << "\n";
+        }
+
         bool TryReadArrangementMemory(
             Tuning& tuning)
         {
@@ -1455,23 +2091,8 @@ namespace RocksmithTuning
                 TUNER_TEXT_2024_ROOT_OFFSET,
             TUNER_TEXT_OFFSETS);
 
-        if (GetExecutableVersion() ==
-            ExecutableVersion::LearnAndPlay2024)
-        {
-            TraceTunerObjectStructure(
-                log,
-                "TUNER OBJECT STRUCTURE - configured 2024 root",
-                base +
-                    TUNER_TEXT_2024_ROOT_OFFSET);
-        }
-        else
-        {
-            TraceTunerObjectStructure(
-                log,
-                "TUNER OBJECT STRUCTURE - configured 2022 root",
-                base +
-                    TUNER_TEXT_2022_ROOT);
-        }
+        TraceDetectionObjects(
+            log);
 
         TraceArrangementPointer(
             log,
