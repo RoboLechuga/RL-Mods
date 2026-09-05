@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace RocksmithTuning
 {
@@ -1058,6 +1059,178 @@ namespace RocksmithTuning
                     tuning);
         }
 
+        void TraceTunerTextCandidates(
+            std::ostringstream& log,
+            const char* label,
+            std::uintptr_t root)
+        {
+            // The proven P1 tuner-text path is:
+            //   [root] -> object + 0x28 -> object + 0x44 -> text
+            // Multiplayer may select a sibling object/field for Player 2.
+            // Scan the same two-level object shape for any Rocksmith tuning
+            // strings so the second player's path can be identified from one
+            // pre-song tuner snapshot without touching game memory.
+            constexpr std::uintptr_t MAX_FIELD_OFFSET = 0x200;
+            constexpr std::uintptr_t FIELD_STEP = 0x4;
+
+            log << label << "\n";
+            log << "  root: "
+                << AddressText(root)
+                << "\n";
+
+            std::uintptr_t rootObject = 0;
+
+            if (!TryReadValue(
+                    root,
+                    rootObject) ||
+                rootObject == 0)
+            {
+                log << "  root object: FAILED\n\n";
+                return;
+            }
+
+            log << "  root object: "
+                << AddressText(rootObject)
+                << "\n";
+
+            std::vector<std::uintptr_t> seenTextAddresses;
+            size_t found = 0;
+
+            for (std::uintptr_t firstOffset = 0;
+                 firstOffset <= MAX_FIELD_OFFSET;
+                 firstOffset += FIELD_STEP)
+            {
+                if (rootObject >
+                    UINTPTR_MAX -
+                    firstOffset)
+                {
+                    break;
+                }
+
+                const std::uintptr_t firstField =
+                    rootObject +
+                    firstOffset;
+
+                std::uintptr_t childObject = 0;
+
+                if (!TryReadValue(
+                        firstField,
+                        childObject) ||
+                    childObject == 0)
+                {
+                    continue;
+                }
+
+                for (std::uintptr_t secondOffset = 0;
+                     secondOffset <= MAX_FIELD_OFFSET;
+                     secondOffset += FIELD_STEP)
+                {
+                    if (childObject >
+                        UINTPTR_MAX -
+                        secondOffset)
+                    {
+                        break;
+                    }
+
+                    const std::uintptr_t secondField =
+                        childObject +
+                        secondOffset;
+
+                    std::uintptr_t textAddress = 0;
+
+                    if (!TryReadValue(
+                            secondField,
+                            textAddress) ||
+                        textAddress == 0)
+                    {
+                        continue;
+                    }
+
+                    bool alreadySeen = false;
+
+                    for (const std::uintptr_t seen :
+                         seenTextAddresses)
+                    {
+                        if (seen == textAddress)
+                        {
+                            alreadySeen = true;
+                            break;
+                        }
+                    }
+
+                    if (alreadySeen)
+                        continue;
+
+                    const std::string text =
+                        ReadString(
+                            textAddress,
+                            128);
+
+                    if (text.empty())
+                        continue;
+
+                    Tuning candidate{};
+
+                    if (!TryLookupTuningText(
+                            text,
+                            candidate))
+                    {
+                        continue;
+                    }
+
+                    seenTextAddresses.push_back(
+                        textAddress);
+
+                    ++found;
+
+                    log << "  candidate "
+                        << found
+                        << ": rootObject + "
+                        << AddressText(firstOffset)
+                        << " -> child "
+                        << AddressText(childObject)
+                        << " + "
+                        << AddressText(secondOffset)
+                        << " -> text "
+                        << AddressText(textAddress)
+                        << "\n";
+
+                    log << "    text: "
+                        << text
+                        << "\n";
+
+                    log << "    tuning: [";
+
+                    for (size_t i = 0;
+                         i < candidate.strings.size();
+                         ++i)
+                    {
+                        if (i != 0)
+                            log << ',';
+
+                        log << candidate.strings[i];
+                    }
+
+                    log << "]";
+
+                    if (firstOffset == 0x28 &&
+                        secondOffset == 0x44)
+                    {
+                        log << "  <known P1 path>";
+                    }
+
+                    log << "\n";
+                }
+            }
+
+            if (found == 0)
+            {
+                log << "  no tuning-text candidates found";
+            }
+
+            log << "\n\n";
+        }
+
         bool TryReadArrangementMemory(
             Tuning& tuning)
         {
@@ -1231,6 +1404,24 @@ namespace RocksmithTuning
             base +
                 TUNER_TEXT_2024_ROOT_OFFSET,
             TUNER_TEXT_OFFSETS);
+
+        if (GetExecutableVersion() ==
+            ExecutableVersion::LearnAndPlay2024)
+        {
+            TraceTunerTextCandidates(
+                log,
+                "MULTIPLAYER TUNER TEXT CANDIDATES - configured 2024 root",
+                base +
+                    TUNER_TEXT_2024_ROOT_OFFSET);
+        }
+        else
+        {
+            TraceTunerTextCandidates(
+                log,
+                "MULTIPLAYER TUNER TEXT CANDIDATES - configured 2022 root",
+                base +
+                    TUNER_TEXT_2022_ROOT);
+        }
 
         TraceArrangementPointer(
             log,

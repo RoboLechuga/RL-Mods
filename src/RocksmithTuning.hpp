@@ -36,6 +36,10 @@ namespace RocksmithTuning
     // the in-song arrangement pointer.
     bool TryReadTunerTarget(Tuning& tuning);
 
+    // Temporary F10 diagnostic used to discover the independent Player 2
+    // pre-song tuner target path. Appends to RLMods_tuning_debug.txt.
+    bool CaptureDebugSnapshot();
+
     // Legacy/general target reader retained for diagnostics and other callers.
     bool TryReadArrangement(Tuning& tuning);
 

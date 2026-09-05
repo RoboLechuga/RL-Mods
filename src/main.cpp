@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include "AsioPassthrough.hpp"
 #include "TuningControl.hpp"
+#include "RocksmithTuning.hpp"
 #include "ScreenshotControl.hpp"
 #include <windows.h>
 #include <Xinput.h>
@@ -271,6 +272,11 @@ namespace
         {
             if (KeyPressedInRocksmith(VK_F8))
                 ForceEnumeration();
+
+            // Temporary multiplayer tuning diagnostic for v1.3.
+            // F8 remains song re-enumeration; F10 only appends a memory snapshot.
+            if (KeyPressedInRocksmith(VK_F10))
+                RocksmithTuning::CaptureDebugSnapshot();
 
             ScreenshotControl::Poll();
             TuningControl::Poll();
