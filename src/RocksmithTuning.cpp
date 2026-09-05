@@ -1716,6 +1716,519 @@ namespace RocksmithTuning
             }
         }
 
+        bool TryReadSignedByteTuningAt(
+            std::uintptr_t object,
+            std::uintptr_t offset,
+            std::uintptr_t stride,
+            std::array<int, 6>& values)
+        {
+            for (size_t i = 0;
+                 i < values.size();
+                 ++i)
+            {
+                std::uint8_t raw = 0;
+
+                if (!TryReadValue(
+                        object + offset +
+                            (i * stride),
+                        raw))
+                {
+                    return false;
+                }
+
+                const int value =
+                    static_cast<int>(
+                        static_cast<std::int8_t>(raw));
+
+                if (value < -24 ||
+                    value > 24)
+                {
+                    return false;
+                }
+
+                values[i] = value;
+            }
+
+            return true;
+        }
+
+        bool TryReadMidiByteTuningAt(
+            std::uintptr_t object,
+            std::uintptr_t offset,
+            std::array<int, 6>& values)
+        {
+            constexpr int BASE_MIDI[6] =
+            {
+                40, 45, 50, 55, 59, 64
+            };
+
+            for (size_t i = 0;
+                 i < values.size();
+                 ++i)
+            {
+                std::uint8_t raw = 0;
+
+                if (!TryReadValue(
+                        object + offset + i,
+                        raw))
+                {
+                    return false;
+                }
+
+                const int value =
+                    static_cast<int>(raw) -
+                    BASE_MIDI[i];
+
+                if (value < -24 ||
+                    value > 24)
+                {
+                    return false;
+                }
+
+                values[i] = value;
+            }
+
+            return true;
+        }
+
+        bool TryReadInt32TuningAt(
+            std::uintptr_t object,
+            std::uintptr_t offset,
+            bool midiValues,
+            std::array<int, 6>& values)
+        {
+            constexpr int BASE_MIDI[6] =
+            {
+                40, 45, 50, 55, 59, 64
+            };
+
+            for (size_t i = 0;
+                 i < values.size();
+                 ++i)
+            {
+                std::int32_t raw = 0;
+
+                if (!TryReadValue(
+                        object + offset +
+                            (i * sizeof(raw)),
+                        raw))
+                {
+                    return false;
+                }
+
+                const int value =
+                    midiValues
+                    ? static_cast<int>(raw) -
+                        BASE_MIDI[i]
+                    : static_cast<int>(raw);
+
+                if (value < -24 ||
+                    value > 24)
+                {
+                    return false;
+                }
+
+                values[i] = value;
+            }
+
+            return true;
+        }
+
+        bool TryReadInt32CentTuningAt(
+            std::uintptr_t object,
+            std::uintptr_t offset,
+            std::array<int, 6>& values)
+        {
+            for (size_t i = 0;
+                 i < values.size();
+                 ++i)
+            {
+                std::int32_t cents = 0;
+
+                if (!TryReadValue(
+                        object + offset +
+                            (i * sizeof(cents)),
+                        cents) ||
+                    cents < -2400 ||
+                    cents > 2400 ||
+                    (cents % 100) != 0)
+                {
+                    return false;
+                }
+
+                values[i] =
+                    static_cast<int>(cents / 100);
+            }
+
+            return true;
+        }
+
+        bool TryReadInt16CentTuningAt(
+            std::uintptr_t object,
+            std::uintptr_t offset,
+            std::array<int, 6>& values)
+        {
+            for (size_t i = 0;
+                 i < values.size();
+                 ++i)
+            {
+                std::int16_t cents = 0;
+
+                if (!TryReadValue(
+                        object + offset +
+                            (i * sizeof(cents)),
+                        cents) ||
+                    cents < -2400 ||
+                    cents > 2400 ||
+                    (cents % 100) != 0)
+                {
+                    return false;
+                }
+
+                values[i] =
+                    static_cast<int>(cents / 100);
+            }
+
+            return true;
+        }
+
+        bool TryReadFloatFrequencyTuningAt(
+            std::uintptr_t object,
+            std::uintptr_t offset,
+            int referenceHz,
+            std::array<int, 6>& values)
+        {
+            constexpr int BASE_MIDI[6] =
+            {
+                40, 45, 50, 55, 59, 64
+            };
+
+            if (referenceHz < 100 ||
+                referenceHz > 1000)
+            {
+                referenceHz = 440;
+            }
+
+            for (size_t i = 0;
+                 i < values.size();
+                 ++i)
+            {
+                float frequency = 0.0f;
+
+                if (!TryReadValue(
+                        object + offset +
+                            (i * sizeof(float)),
+                        frequency) ||
+                    !std::isfinite(frequency) ||
+                    frequency < 20.0f ||
+                    frequency > 2000.0f)
+                {
+                    return false;
+                }
+
+                const double midiExact =
+                    69.0 +
+                    12.0 *
+                        std::log2(
+                            static_cast<double>(frequency) /
+                            static_cast<double>(referenceHz));
+
+                const int midi =
+                    static_cast<int>(
+                        std::round(midiExact));
+
+                if (std::fabs(
+                        midiExact -
+                        static_cast<double>(midi)) >
+                    0.03)
+                {
+                    return false;
+                }
+
+                const int value =
+                    midi - BASE_MIDI[i];
+
+                if (value < -24 ||
+                    value > 24)
+                {
+                    return false;
+                }
+
+                values[i] = value;
+            }
+
+            return true;
+        }
+
+        void TraceDetectionPairTuningDifferences(
+            std::ostringstream& log,
+            std::uintptr_t player1,
+            std::uintptr_t player2)
+        {
+            constexpr std::uintptr_t SCAN_BYTES = 0x1800;
+            constexpr size_t MAX_HITS = 64;
+
+            log << "\nP1/P2 SAME-OFFSET TUNING DIFFERENCES\n";
+            log << "  P1: "
+                << AddressText(player1)
+                << "\n";
+            log << "  P2: "
+                << AddressText(player2)
+                << "\n";
+
+            if (!player1 || !player2 ||
+                player1 == player2)
+            {
+                log << "  result: invalid pair\n";
+                return;
+            }
+
+            float p1Reference = 440.0f;
+            float p2Reference = 440.0f;
+
+            TryReadValue(
+                player1 + 0x135C,
+                p1Reference);
+            TryReadValue(
+                player2 + 0x135C,
+                p2Reference);
+
+            const int p1ReferenceHz =
+                static_cast<int>(
+                    std::round(p1Reference));
+            const int p2ReferenceHz =
+                static_cast<int>(
+                    std::round(p2Reference));
+
+            size_t hits = 0;
+
+            auto report =
+                [&](const char* kind,
+                    std::uintptr_t offset,
+                    const std::array<int, 6>& p1Values,
+                    const char* p1Key,
+                    const std::array<int, 6>& p2Values,
+                    const char* p2Key)
+                {
+                    if (hits >= MAX_HITS)
+                        return;
+
+                    log << "  "
+                        << kind
+                        << " at +"
+                        << AddressText(offset)
+                        << ": P1 "
+                        << p1Key
+                        << " [";
+
+                    for (size_t i = 0;
+                         i < p1Values.size();
+                         ++i)
+                    {
+                        if (i != 0)
+                            log << ',';
+                        log << p1Values[i];
+                    }
+
+                    log << "]  |  P2 "
+                        << p2Key
+                        << " [";
+
+                    for (size_t i = 0;
+                         i < p2Values.size();
+                         ++i)
+                    {
+                        if (i != 0)
+                            log << ',';
+                        log << p2Values[i];
+                    }
+
+                    log << "]\n";
+                    ++hits;
+                };
+
+            auto maybeReport =
+                [&](const char* kind,
+                    std::uintptr_t offset,
+                    const std::array<int, 6>& p1Values,
+                    bool p1Valid,
+                    const std::array<int, 6>& p2Values,
+                    bool p2Valid)
+                {
+                    if (!p1Valid ||
+                        !p2Valid ||
+                        p1Values == p2Values)
+                    {
+                        return;
+                    }
+
+                    const char* p1Key =
+                        FindKnownTuningKey(p1Values);
+                    const char* p2Key =
+                        FindKnownTuningKey(p2Values);
+
+                    if (!p1Key || !p2Key)
+                        return;
+
+                    report(
+                        kind,
+                        offset,
+                        p1Values,
+                        p1Key,
+                        p2Values,
+                        p2Key);
+                };
+
+            for (std::uintptr_t offset = 0;
+                 offset + 12 <= SCAN_BYTES &&
+                 hits < MAX_HITS;
+                 ++offset)
+            {
+                std::array<int, 6> p1Values{};
+                std::array<int, 6> p2Values{};
+
+                maybeReport(
+                    "signed-byte",
+                    offset,
+                    p1Values,
+                    TryReadSignedByteTuningAt(
+                        player1,
+                        offset,
+                        1,
+                        p1Values),
+                    p2Values,
+                    TryReadSignedByteTuningAt(
+                        player2,
+                        offset,
+                        1,
+                        p2Values));
+
+                maybeReport(
+                    "stride-2 byte",
+                    offset,
+                    p1Values,
+                    TryReadSignedByteTuningAt(
+                        player1,
+                        offset,
+                        2,
+                        p1Values),
+                    p2Values,
+                    TryReadSignedByteTuningAt(
+                        player2,
+                        offset,
+                        2,
+                        p2Values));
+
+                maybeReport(
+                    "MIDI byte",
+                    offset,
+                    p1Values,
+                    TryReadMidiByteTuningAt(
+                        player1,
+                        offset,
+                        p1Values),
+                    p2Values,
+                    TryReadMidiByteTuningAt(
+                        player2,
+                        offset,
+                        p2Values));
+
+                maybeReport(
+                    "int16 cents",
+                    offset,
+                    p1Values,
+                    TryReadInt16CentTuningAt(
+                        player1,
+                        offset,
+                        p1Values),
+                    p2Values,
+                    TryReadInt16CentTuningAt(
+                        player2,
+                        offset,
+                        p2Values));
+            }
+
+            for (std::uintptr_t offset = 0;
+                 offset + 24 <= SCAN_BYTES &&
+                 hits < MAX_HITS;
+                 offset += 4)
+            {
+                std::array<int, 6> p1Values{};
+                std::array<int, 6> p2Values{};
+
+                maybeReport(
+                    "int32",
+                    offset,
+                    p1Values,
+                    TryReadInt32TuningAt(
+                        player1,
+                        offset,
+                        false,
+                        p1Values),
+                    p2Values,
+                    TryReadInt32TuningAt(
+                        player2,
+                        offset,
+                        false,
+                        p2Values));
+
+                maybeReport(
+                    "MIDI int32",
+                    offset,
+                    p1Values,
+                    TryReadInt32TuningAt(
+                        player1,
+                        offset,
+                        true,
+                        p1Values),
+                    p2Values,
+                    TryReadInt32TuningAt(
+                        player2,
+                        offset,
+                        true,
+                        p2Values));
+
+                maybeReport(
+                    "int32 cents",
+                    offset,
+                    p1Values,
+                    TryReadInt32CentTuningAt(
+                        player1,
+                        offset,
+                        p1Values),
+                    p2Values,
+                    TryReadInt32CentTuningAt(
+                        player2,
+                        offset,
+                        p2Values));
+
+                maybeReport(
+                    "float frequency",
+                    offset,
+                    p1Values,
+                    TryReadFloatFrequencyTuningAt(
+                        player1,
+                        offset,
+                        p1ReferenceHz,
+                        p1Values),
+                    p2Values,
+                    TryReadFloatFrequencyTuningAt(
+                        player2,
+                        offset,
+                        p2ReferenceHz,
+                        p2Values));
+            }
+
+            if (hits == 0)
+            {
+                log << "  no differing known tuning structures found\n";
+            }
+            else if (hits >= MAX_HITS)
+            {
+                log << "  hit limit reached\n";
+            }
+        }
+
         void TraceDetectionObjects(
             std::ostringstream& log)
         {
@@ -2370,6 +2883,23 @@ namespace RocksmithTuning
                     log,
                     summary.detection,
                     referenceHz);
+            }
+
+            if (currentPlayer1 != 0)
+            {
+                for (const auto& summary : detections)
+                {
+                    if (summary.detection == 0 ||
+                        summary.detection == currentPlayer1)
+                    {
+                        continue;
+                    }
+
+                    TraceDetectionPairTuningDifferences(
+                        log,
+                        currentPlayer1,
+                        summary.detection);
+                }
             }
 
             g_builderLastDumpSequence = total;
