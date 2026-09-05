@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -2488,7 +2489,7 @@ namespace RocksmithTuning
         constexpr LONG BUILDER_CAPTURE_SLOTS = 64;
         constexpr DWORD TRAP_FLAG = 0x100;
 
-        constexpr size_t BUILDER_STACK_DWORDS = 20;
+        constexpr size_t BUILDER_STACK_DWORDS = 64;
 
         struct BuilderCapture
         {
@@ -2505,6 +2506,8 @@ namespace RocksmithTuning
             std::uintptr_t edi = 0;
             std::uintptr_t ebp = 0;
             std::uintptr_t esp = 0;
+            std::uintptr_t eip = 0;
+            DWORD eflags = 0;
 
             std::array<std::uintptr_t, BUILDER_STACK_DWORDS> stack{};
         };
@@ -2606,6 +2609,8 @@ namespace RocksmithTuning
                 capture.edi = context->Edi;
                 capture.ebp = context->Ebp;
                 capture.esp = context->Esp;
+                capture.eip = context->Eip;
+                capture.eflags = context->EFlags;
 
                 for (size_t i = 0;
                      i < BUILDER_STACK_DWORDS;
@@ -2820,7 +2825,25 @@ namespace RocksmithTuning
             else
                 log << capture.cents;
 
-            log << "\n";
+            log << " thread="
+                << capture.threadId
+                << " tick="
+                << capture.tick;
+
+            if (!capture.stack.empty())
+            {
+                log << " return="
+                    << AddressText(capture.stack[0]);
+            }
+
+            log << " EIP="
+                << AddressText(capture.eip)
+                << " EFLAGS=0x"
+                << std::uppercase
+                << std::hex
+                << capture.eflags
+                << std::dec
+                << "\n";
 
             AppendContextPointerPreview(log, "EAX", capture.eax);
             AppendContextPointerPreview(log, "EBX", capture.ebx);
@@ -2996,6 +3019,897 @@ namespace RocksmithTuning
             }
 
             log << "\n";
+        }
+
+
+        struct BuilderContextRootPair
+        {
+            std::uintptr_t player1 = 0;
+            std::uintptr_t player2 = 0;
+            std::string label;
+        };
+
+        bool SamePointerPair(
+            const BuilderContextRootPair& pair,
+            std::uintptr_t player1,
+            std::uintptr_t player2)
+        {
+            return pair.player1 == player1 &&
+                pair.player2 == player2;
+        }
+
+        void AddBuilderContextRootPair(
+            std::vector<BuilderContextRootPair>& roots,
+            const std::string& label,
+            std::uintptr_t player1,
+            std::uintptr_t player2)
+        {
+            constexpr size_t MAX_ROOT_PAIRS = 96;
+
+            if (roots.size() >= MAX_ROOT_PAIRS ||
+                player1 == player2 ||
+                !LooksLikePointerValue(player1) ||
+                !LooksLikePointerValue(player2))
+            {
+                return;
+            }
+
+            for (const auto& existing : roots)
+            {
+                if (SamePointerPair(
+                        existing,
+                        player1,
+                        player2))
+                {
+                    return;
+                }
+            }
+
+            BuilderContextRootPair root{};
+            root.player1 = player1;
+            root.player2 = player2;
+            root.label = label;
+            roots.push_back(root);
+        }
+
+        void AppendAllBuilderContexts(
+            std::ostringstream& log,
+            LONG firstSequence,
+            LONG total,
+            std::uintptr_t currentPlayer1)
+        {
+            log << "\nALL BUILDER EVENT CONTEXTS (64 stack dwords each)\n";
+
+            for (LONG sequence = firstSequence;
+                 sequence <= total;
+                 ++sequence)
+            {
+                BuilderCapture& slot =
+                    g_builderCaptures[
+                        (sequence - 1) &
+                        (BUILDER_CAPTURE_SLOTS - 1)];
+
+                if (InterlockedCompareExchange(
+                        &slot.sequence,
+                        0,
+                        0) != sequence)
+                {
+                    continue;
+                }
+
+                const char* owner =
+                    slot.detection == currentPlayer1
+                    ? "<P1>"
+                    : (slot.detection != 0 && currentPlayer1 != 0
+                        ? "<P2/other>"
+                        : "<unknown>");
+
+                AppendBuilderCallContext(
+                    log,
+                    sequence,
+                    slot,
+                    owner);
+            }
+        }
+
+        void AppendUniqueBuilderCallers(
+            std::ostringstream& log,
+            LONG firstSequence,
+            LONG total)
+        {
+            std::vector<std::uintptr_t> callers;
+
+            for (LONG sequence = firstSequence;
+                 sequence <= total;
+                 ++sequence)
+            {
+                BuilderCapture& slot =
+                    g_builderCaptures[
+                        (sequence - 1) &
+                        (BUILDER_CAPTURE_SLOTS - 1)];
+
+                if (InterlockedCompareExchange(
+                        &slot.sequence,
+                        0,
+                        0) != sequence ||
+                    slot.stack.empty())
+                {
+                    continue;
+                }
+
+                const std::uintptr_t caller =
+                    slot.stack[0];
+
+                if (!caller)
+                    continue;
+
+                bool seen = false;
+
+                for (const auto existing : callers)
+                {
+                    if (existing == caller)
+                    {
+                        seen = true;
+                        break;
+                    }
+                }
+
+                if (!seen)
+                    callers.push_back(caller);
+            }
+
+            log << "\nUNIQUE BUILDER CALLERS\n";
+
+            if (callers.empty())
+            {
+                log << "  none\n";
+                return;
+            }
+
+            for (size_t i = 0;
+                 i < callers.size();
+                 ++i)
+            {
+                const std::uintptr_t caller = callers[i];
+                log << "  caller " << (i + 1)
+                    << ": " << AddressText(caller)
+                    << "\n";
+
+                const std::uintptr_t start =
+                    caller >= 16
+                    ? caller - 16
+                    : caller;
+
+                TraceRawBytes(
+                    log,
+                    start,
+                    80);
+            }
+
+            log << "  reference builder bytes\n";
+            TraceRawBytes(
+                log,
+                g_referenceBuilder,
+                96);
+        }
+
+        void ReportPairTuningHit(
+            std::ostringstream& log,
+            const std::string& path,
+            const char* kind,
+            std::uintptr_t offset,
+            const std::array<int, 6>& p1Values,
+            const std::array<int, 6>& p2Values)
+        {
+            const char* p1Key =
+                FindKnownTuningKey(p1Values);
+            const char* p2Key =
+                FindKnownTuningKey(p2Values);
+
+            if (!p1Key || !p2Key ||
+                p1Values == p2Values)
+            {
+                return;
+            }
+
+            log << "    *** TUNING-DIFF "
+                << path
+                << " +"
+                << AddressText(offset)
+                << " "
+                << kind
+                << ": P1="
+                << p1Key
+                << " [";
+
+            for (size_t i = 0;
+                 i < p1Values.size();
+                 ++i)
+            {
+                if (i != 0) log << ',';
+                log << p1Values[i];
+            }
+
+            log << "] P2="
+                << p2Key
+                << " [";
+
+            for (size_t i = 0;
+                 i < p2Values.size();
+                 ++i)
+            {
+                if (i != 0) log << ',';
+                log << p2Values[i];
+            }
+
+            log << "]\n";
+        }
+
+        void ScanPairNodeForTuningDifferences(
+            std::ostringstream& log,
+            const std::string& path,
+            std::uintptr_t player1,
+            std::uintptr_t player2)
+        {
+            constexpr size_t SCAN_BYTES = 0x600;
+            constexpr int BASE_MIDI[6] =
+            {
+                40, 45, 50, 55, 59, 64
+            };
+
+            if (!IsReadableRange(
+                    reinterpret_cast<const void*>(player1),
+                    SCAN_BYTES) ||
+                !IsReadableRange(
+                    reinterpret_cast<const void*>(player2),
+                    SCAN_BYTES))
+            {
+                return;
+            }
+
+            std::array<std::uint8_t, SCAN_BYTES> p1Bytes{};
+            std::array<std::uint8_t, SCAN_BYTES> p2Bytes{};
+
+            std::memcpy(
+                p1Bytes.data(),
+                reinterpret_cast<const void*>(player1),
+                SCAN_BYTES);
+            std::memcpy(
+                p2Bytes.data(),
+                reinterpret_cast<const void*>(player2),
+                SCAN_BYTES);
+
+            auto signedByteTuning =
+                [](const auto& bytes,
+                   size_t offset,
+                   size_t stride,
+                   std::array<int, 6>& values)
+                {
+                    if (offset + (5 * stride) >= bytes.size())
+                        return false;
+
+                    for (size_t i = 0; i < values.size(); ++i)
+                    {
+                        const int value =
+                            static_cast<int>(
+                                static_cast<std::int8_t>(
+                                    bytes[offset + (i * stride)]));
+
+                        if (value < -24 || value > 24)
+                            return false;
+
+                        values[i] = value;
+                    }
+
+                    return true;
+                };
+
+            auto midiByteTuning =
+                [&](const auto& bytes,
+                    size_t offset,
+                    std::array<int, 6>& values)
+                {
+                    if (offset + 6 > bytes.size())
+                        return false;
+
+                    for (size_t i = 0; i < values.size(); ++i)
+                    {
+                        const int value =
+                            static_cast<int>(bytes[offset + i]) -
+                            BASE_MIDI[i];
+
+                        if (value < -24 || value > 24)
+                            return false;
+
+                        values[i] = value;
+                    }
+
+                    return true;
+                };
+
+            auto int16CentsTuning =
+                [](const auto& bytes,
+                   size_t offset,
+                   std::array<int, 6>& values)
+                {
+                    if (offset + (6 * sizeof(std::int16_t)) > bytes.size())
+                        return false;
+
+                    for (size_t i = 0; i < values.size(); ++i)
+                    {
+                        std::int16_t cents = 0;
+                        std::memcpy(
+                            &cents,
+                            bytes.data() + offset +
+                                (i * sizeof(cents)),
+                            sizeof(cents));
+
+                        if (cents < -2400 ||
+                            cents > 2400 ||
+                            (cents % 100) != 0)
+                        {
+                            return false;
+                        }
+
+                        values[i] = cents / 100;
+                    }
+
+                    return true;
+                };
+
+            auto int32Tuning =
+                [&](const auto& bytes,
+                    size_t offset,
+                    bool midi,
+                    std::array<int, 6>& values)
+                {
+                    if (offset + (6 * sizeof(std::int32_t)) > bytes.size())
+                        return false;
+
+                    for (size_t i = 0; i < values.size(); ++i)
+                    {
+                        std::int32_t raw = 0;
+                        std::memcpy(
+                            &raw,
+                            bytes.data() + offset +
+                                (i * sizeof(raw)),
+                            sizeof(raw));
+
+                        const int value =
+                            midi
+                            ? static_cast<int>(raw) - BASE_MIDI[i]
+                            : static_cast<int>(raw);
+
+                        if (value < -24 || value > 24)
+                            return false;
+
+                        values[i] = value;
+                    }
+
+                    return true;
+                };
+
+            auto int32CentsTuning =
+                [](const auto& bytes,
+                   size_t offset,
+                   std::array<int, 6>& values)
+                {
+                    if (offset + (6 * sizeof(std::int32_t)) > bytes.size())
+                        return false;
+
+                    for (size_t i = 0; i < values.size(); ++i)
+                    {
+                        std::int32_t cents = 0;
+                        std::memcpy(
+                            &cents,
+                            bytes.data() + offset +
+                                (i * sizeof(cents)),
+                            sizeof(cents));
+
+                        if (cents < -2400 ||
+                            cents > 2400 ||
+                            (cents % 100) != 0)
+                        {
+                            return false;
+                        }
+
+                        values[i] = cents / 100;
+                    }
+
+                    return true;
+                };
+
+            auto floatFrequencyTuning =
+                [&](const auto& bytes,
+                    size_t offset,
+                    std::array<int, 6>& values)
+                {
+                    if (offset + (6 * sizeof(float)) > bytes.size())
+                        return false;
+
+                    for (size_t i = 0; i < values.size(); ++i)
+                    {
+                        float frequency = 0.0f;
+                        std::memcpy(
+                            &frequency,
+                            bytes.data() + offset +
+                                (i * sizeof(frequency)),
+                            sizeof(frequency));
+
+                        if (!std::isfinite(frequency) ||
+                            frequency < 20.0f ||
+                            frequency > 2000.0f)
+                        {
+                            return false;
+                        }
+
+                        const double midiExact =
+                            69.0 +
+                            12.0 * std::log2(
+                                static_cast<double>(frequency) /
+                                440.0);
+
+                        const int midi =
+                            static_cast<int>(std::round(midiExact));
+
+                        if (std::fabs(
+                                midiExact -
+                                static_cast<double>(midi)) > 0.03)
+                        {
+                            return false;
+                        }
+
+                        const int value =
+                            midi - BASE_MIDI[i];
+
+                        if (value < -24 || value > 24)
+                            return false;
+
+                        values[i] = value;
+                    }
+
+                    return true;
+                };
+
+            for (size_t offset = 0;
+                 offset + 12 <= SCAN_BYTES;
+                 ++offset)
+            {
+                std::array<int, 6> p1Values{};
+                std::array<int, 6> p2Values{};
+
+                if (signedByteTuning(p1Bytes, offset, 1, p1Values) &&
+                    signedByteTuning(p2Bytes, offset, 1, p2Values))
+                {
+                    ReportPairTuningHit(log, path, "signed-byte", offset, p1Values, p2Values);
+                }
+
+                if (signedByteTuning(p1Bytes, offset, 2, p1Values) &&
+                    signedByteTuning(p2Bytes, offset, 2, p2Values))
+                {
+                    ReportPairTuningHit(log, path, "stride-2-byte", offset, p1Values, p2Values);
+                }
+
+                if (midiByteTuning(p1Bytes, offset, p1Values) &&
+                    midiByteTuning(p2Bytes, offset, p2Values))
+                {
+                    ReportPairTuningHit(log, path, "MIDI-byte", offset, p1Values, p2Values);
+                }
+
+                if (int16CentsTuning(p1Bytes, offset, p1Values) &&
+                    int16CentsTuning(p2Bytes, offset, p2Values))
+                {
+                    ReportPairTuningHit(log, path, "int16-cents", offset, p1Values, p2Values);
+                }
+            }
+
+            for (size_t offset = 0;
+                 offset + 24 <= SCAN_BYTES;
+                 offset += 4)
+            {
+                std::array<int, 6> p1Values{};
+                std::array<int, 6> p2Values{};
+
+                if (int32Tuning(p1Bytes, offset, false, p1Values) &&
+                    int32Tuning(p2Bytes, offset, false, p2Values))
+                {
+                    ReportPairTuningHit(log, path, "int32", offset, p1Values, p2Values);
+                }
+
+                if (int32Tuning(p1Bytes, offset, true, p1Values) &&
+                    int32Tuning(p2Bytes, offset, true, p2Values))
+                {
+                    ReportPairTuningHit(log, path, "MIDI-int32", offset, p1Values, p2Values);
+                }
+
+                if (int32CentsTuning(p1Bytes, offset, p1Values) &&
+                    int32CentsTuning(p2Bytes, offset, p2Values))
+                {
+                    ReportPairTuningHit(log, path, "int32-cents", offset, p1Values, p2Values);
+                }
+
+                if (floatFrequencyTuning(p1Bytes, offset, p1Values) &&
+                    floatFrequencyTuning(p2Bytes, offset, p2Values))
+                {
+                    ReportPairTuningHit(log, path, "float-frequency", offset, p1Values, p2Values);
+                }
+            }
+        }
+
+        void ScanPairNodeForStringsAndRawDiffs(
+            std::ostringstream& log,
+            const std::string& path,
+            std::uintptr_t player1,
+            std::uintptr_t player2)
+        {
+            constexpr std::uintptr_t FIELD_BYTES = 0x200;
+            constexpr size_t MAX_STRING_DIFFS = 24;
+            constexpr size_t MAX_RAW_DIFFS = 32;
+
+            size_t stringDiffs = 0;
+            size_t rawDiffs = 0;
+
+            for (std::uintptr_t offset = 0;
+                 offset + sizeof(std::uintptr_t) <= FIELD_BYTES;
+                 offset += sizeof(std::uintptr_t))
+            {
+                std::uintptr_t p1Value = 0;
+                std::uintptr_t p2Value = 0;
+
+                if (!TryReadValue(player1 + offset, p1Value) ||
+                    !TryReadValue(player2 + offset, p2Value) ||
+                    p1Value == p2Value)
+                {
+                    continue;
+                }
+
+                if (rawDiffs < MAX_RAW_DIFFS)
+                {
+                    log << "    RAW-DIFF "
+                        << path
+                        << " +"
+                        << AddressText(offset)
+                        << ": P1="
+                        << AddressText(p1Value)
+                        << " P2="
+                        << AddressText(p2Value);
+
+                    const std::int32_t p1Signed =
+                        static_cast<std::int32_t>(p1Value);
+                    const std::int32_t p2Signed =
+                        static_cast<std::int32_t>(p2Value);
+
+                    if ((p1Signed >= -2400 && p1Signed <= 2400) ||
+                        (p2Signed >= -2400 && p2Signed <= 2400))
+                    {
+                        log << " signed=("
+                            << p1Signed
+                            << ','
+                            << p2Signed
+                            << ')';
+                    }
+
+                    float p1Float = 0.0f;
+                    float p2Float = 0.0f;
+                    TryReadValue(player1 + offset, p1Float);
+                    TryReadValue(player2 + offset, p2Float);
+
+                    if ((std::isfinite(p1Float) && std::fabs(p1Float) < 100000.0f) ||
+                        (std::isfinite(p2Float) && std::fabs(p2Float) < 100000.0f))
+                    {
+                        log << " float=("
+                            << p1Float
+                            << ','
+                            << p2Float
+                            << ')';
+                    }
+
+                    log << "\n";
+                    ++rawDiffs;
+                }
+
+                const bool p1Pointer =
+                    LooksLikePointerValue(p1Value);
+                const bool p2Pointer =
+                    LooksLikePointerValue(p2Value);
+
+                if (stringDiffs < MAX_STRING_DIFFS &&
+                    p1Pointer != p2Pointer)
+                {
+                    const std::uintptr_t pointerValue =
+                        p1Pointer ? p1Value : p2Value;
+                    const std::string pointerText =
+                        ReadString(pointerValue, 128);
+
+                    log << "    ASYMMETRIC-POINTER "
+                        << path
+                        << " +"
+                        << AddressText(offset)
+                        << ": "
+                        << (p1Pointer ? "P1=" : "P2=")
+                        << AddressText(pointerValue);
+
+                    if (LooksLikeDiagnosticText(pointerText))
+                    {
+                        log << " text=\""
+                            << pointerText
+                            << "\"";
+                    }
+
+                    log << "\n";
+                    ++stringDiffs;
+                }
+
+                if (stringDiffs >= MAX_STRING_DIFFS ||
+                    !p1Pointer ||
+                    !p2Pointer)
+                {
+                    continue;
+                }
+
+                const std::string p1Text =
+                    ReadString(p1Value, 128);
+                const std::string p2Text =
+                    ReadString(p2Value, 128);
+
+                if (!LooksLikeDiagnosticText(p1Text) ||
+                    !LooksLikeDiagnosticText(p2Text) ||
+                    p1Text == p2Text)
+                {
+                    continue;
+                }
+
+                Tuning p1Tuning{};
+                Tuning p2Tuning{};
+                const bool p1IsTuning =
+                    TryLookupTuningText(p1Text, p1Tuning);
+                const bool p2IsTuning =
+                    TryLookupTuningText(p2Text, p2Tuning);
+
+                log << "    "
+                    << (p1IsTuning || p2IsTuning
+                        ? "*** TUNING-TEXT-DIFF "
+                        : "STRING-DIFF ")
+                    << path
+                    << " +"
+                    << AddressText(offset)
+                    << ": P1=\""
+                    << p1Text
+                    << "\" P2=\""
+                    << p2Text
+                    << "\"\n";
+
+                ++stringDiffs;
+            }
+        }
+
+        void AppendExhaustiveBuilderPointerGraph(
+            std::ostringstream& log,
+            LONG firstSequence,
+            LONG total,
+            std::uintptr_t currentPlayer1)
+        {
+            constexpr size_t MAX_GRAPH_NODES = 384;
+            constexpr int MAX_GRAPH_DEPTH = 3;
+            constexpr std::uintptr_t CHILD_FIELD_BYTES = 0x200;
+
+            std::vector<const BuilderCapture*> p1Captures;
+            std::vector<const BuilderCapture*> p2Captures;
+
+            for (LONG sequence = firstSequence;
+                 sequence <= total;
+                 ++sequence)
+            {
+                BuilderCapture& slot =
+                    g_builderCaptures[
+                        (sequence - 1) &
+                        (BUILDER_CAPTURE_SLOTS - 1)];
+
+                if (InterlockedCompareExchange(
+                        &slot.sequence,
+                        0,
+                        0) != sequence ||
+                    slot.detection == 0)
+                {
+                    continue;
+                }
+
+                if (slot.detection == currentPlayer1)
+                    p1Captures.push_back(&slot);
+                else if (currentPlayer1 != 0)
+                    p2Captures.push_back(&slot);
+            }
+
+            log << "\nEXHAUSTIVE P1/P2 CONTEXT POINTER GRAPH\n";
+            log << "  depth=" << MAX_GRAPH_DEPTH
+                << " maxNodes=" << MAX_GRAPH_NODES
+                << " scanBytesPerNode=0x600"
+                << " childFields=0x200\n";
+
+            if (p1Captures.empty() || p2Captures.empty())
+            {
+                log << "  insufficient P1/P2 captures for graph search\n";
+                return;
+            }
+
+            std::vector<BuilderContextRootPair> roots;
+
+            for (size_t p1Index = 0;
+                 p1Index < p1Captures.size();
+                 ++p1Index)
+            {
+                for (size_t p2Index = 0;
+                     p2Index < p2Captures.size();
+                     ++p2Index)
+                {
+                    const BuilderCapture& p1 = *p1Captures[p1Index];
+                    const BuilderCapture& p2 = *p2Captures[p2Index];
+
+                    char prefix[64] = {};
+                    sprintf_s(
+                        prefix,
+                        "eventPair[%u,%u]",
+                        static_cast<unsigned int>(p1Index),
+                        static_cast<unsigned int>(p2Index));
+
+                    AddBuilderContextRootPair(roots, std::string(prefix) + "/DETECTION", p1.detection, p2.detection);
+                    AddBuilderContextRootPair(roots, std::string(prefix) + "/EAX", p1.eax, p2.eax);
+                    AddBuilderContextRootPair(roots, std::string(prefix) + "/EBX", p1.ebx, p2.ebx);
+                    AddBuilderContextRootPair(roots, std::string(prefix) + "/ECX", p1.ecx, p2.ecx);
+                    AddBuilderContextRootPair(roots, std::string(prefix) + "/EDX", p1.edx, p2.edx);
+                    AddBuilderContextRootPair(roots, std::string(prefix) + "/EDI", p1.edi, p2.edi);
+                    AddBuilderContextRootPair(roots, std::string(prefix) + "/EBP", p1.ebp, p2.ebp);
+
+                    for (size_t i = 0;
+                         i < BUILDER_STACK_DWORDS;
+                         ++i)
+                    {
+                        char label[96] = {};
+                        sprintf_s(
+                            label,
+                            "%s/STACK+0x%02X",
+                            prefix,
+                            static_cast<unsigned int>(
+                                i * sizeof(std::uintptr_t)));
+
+                        AddBuilderContextRootPair(
+                            roots,
+                            label,
+                            p1.stack[i],
+                            p2.stack[i]);
+                    }
+                }
+            }
+
+            log << "  unique root pairs="
+                << roots.size()
+                << "\n";
+
+            struct GraphNode
+            {
+                std::uintptr_t player1 = 0;
+                std::uintptr_t player2 = 0;
+                int depth = 0;
+                std::string path;
+            };
+
+            std::vector<GraphNode> nodes;
+
+            auto enqueue =
+                [&](std::uintptr_t player1,
+                    std::uintptr_t player2,
+                    int depth,
+                    const std::string& path)
+                {
+                    if (nodes.size() >= MAX_GRAPH_NODES ||
+                        player1 == player2 ||
+                        !LooksLikePointerValue(player1) ||
+                        !LooksLikePointerValue(player2))
+                    {
+                        return;
+                    }
+
+                    for (const auto& existing : nodes)
+                    {
+                        if (existing.player1 == player1 &&
+                            existing.player2 == player2)
+                        {
+                            return;
+                        }
+                    }
+
+                    GraphNode node{};
+                    node.player1 = player1;
+                    node.player2 = player2;
+                    node.depth = depth;
+                    node.path = path;
+                    nodes.push_back(node);
+                };
+
+            for (const auto& root : roots)
+            {
+                enqueue(
+                    root.player1,
+                    root.player2,
+                    0,
+                    root.label);
+            }
+
+            for (size_t cursor = 0;
+                 cursor < nodes.size() &&
+                 cursor < MAX_GRAPH_NODES;
+                 ++cursor)
+            {
+                const GraphNode node = nodes[cursor];
+
+                log << "\n  GRAPH-NODE "
+                    << (cursor + 1)
+                    << " depth="
+                    << node.depth
+                    << " path="
+                    << node.path
+                    << "\n"
+                    << "    P1="
+                    << AddressText(node.player1)
+                    << " P2="
+                    << AddressText(node.player2)
+                    << "\n";
+
+                ScanPairNodeForTuningDifferences(
+                    log,
+                    node.path,
+                    node.player1,
+                    node.player2);
+
+                ScanPairNodeForStringsAndRawDiffs(
+                    log,
+                    node.path,
+                    node.player1,
+                    node.player2);
+
+                if (node.depth >= MAX_GRAPH_DEPTH)
+                    continue;
+
+                for (std::uintptr_t offset = 0;
+                     offset + sizeof(std::uintptr_t) <= CHILD_FIELD_BYTES;
+                     offset += sizeof(std::uintptr_t))
+                {
+                    std::uintptr_t p1Child = 0;
+                    std::uintptr_t p2Child = 0;
+
+                    if (!TryReadValue(node.player1 + offset, p1Child) ||
+                        !TryReadValue(node.player2 + offset, p2Child) ||
+                        p1Child == p2Child ||
+                        !LooksLikePointerValue(p1Child) ||
+                        !LooksLikePointerValue(p2Child))
+                    {
+                        continue;
+                    }
+
+                    char suffix[32] = {};
+                    sprintf_s(
+                        suffix,
+                        "->+0x%03X",
+                        static_cast<unsigned int>(offset));
+
+                    enqueue(
+                        p1Child,
+                        p2Child,
+                        node.depth + 1,
+                        node.path + suffix);
+                }
+            }
+
+            log << "\n  graph nodes visited="
+                << (nodes.size() < MAX_GRAPH_NODES
+                    ? nodes.size()
+                    : MAX_GRAPH_NODES)
+                << "\n";
+
+            if (nodes.size() >= MAX_GRAPH_NODES)
+            {
+                log << "  NOTE: graph node cap reached; root/context data above remains complete\n";
+            }
         }
 
         void AppendBuilderCaptureSummary(
@@ -3188,6 +4102,23 @@ namespace RocksmithTuning
                 total,
                 currentPlayer1);
 
+            AppendAllBuilderContexts(
+                log,
+                firstSequence,
+                total,
+                currentPlayer1);
+
+            AppendUniqueBuilderCallers(
+                log,
+                firstSequence,
+                total);
+
+            AppendExhaustiveBuilderPointerGraph(
+                log,
+                firstSequence,
+                total,
+                currentPlayer1);
+
             g_builderLastDumpSequence = total;
         }
 
@@ -3274,6 +4205,7 @@ namespace RocksmithTuning
 
         log << "============================================================\n";
         log << "RL-Mods tuning-reference builder context diagnostic\n";
+        log << "BUILD: BUILDER_CONTEXT_V2_EXHAUSTIVE\n";
         log << std::setfill('0')
             << std::dec
             << now.wYear << '-'
@@ -3306,7 +4238,7 @@ namespace RocksmithTuning
         {
             log << "BUILDER HOOK ARMED\n";
             log << "  This first F10 only arms the capture hook.\n";
-            log << "  Enter/re-enter a pre-song tuner, then press F10 there.\n";
+            log << "  Enter the MULTIPLAYER pre-song tuner with different P1/P2 arrangements, then press F10 there.\n";
         }
         else
         {
