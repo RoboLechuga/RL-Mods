@@ -1059,19 +1059,176 @@ namespace RocksmithTuning
                     tuning);
         }
 
-        void TraceTunerTextCandidates(
+        bool LooksLikeDiagnosticText(
+            const std::string& text)
+        {
+            if (text.size() < 3 ||
+                text.size() > 127)
+            {
+                return false;
+            }
+
+            size_t alphaNumeric = 0;
+
+            for (unsigned char c : text)
+            {
+                if (c < 32 || c == 127)
+                    return false;
+
+                if (std::isalnum(c))
+                    ++alphaNumeric;
+            }
+
+            return alphaNumeric >= 2;
+        }
+
+        void TraceObjectFieldMap(
+            std::ostringstream& log,
+            const char* label,
+            std::uintptr_t object,
+            std::uintptr_t maxOffset,
+            bool followOneLevel)
+        {
+            constexpr std::uintptr_t FIELD_STEP = 0x4;
+            constexpr std::uintptr_t NESTED_MAX_OFFSET = 0x100;
+
+            log << label << "\n";
+            log << "  object: "
+                << AddressText(object)
+                << "\n";
+
+            if (!object)
+            {
+                log << "  result: NULL\n\n";
+                return;
+            }
+
+            std::vector<std::uintptr_t> seenStrings;
+
+            for (std::uintptr_t offset = 0;
+                 offset <= maxOffset;
+                 offset += FIELD_STEP)
+            {
+                if (object > UINTPTR_MAX - offset)
+                    break;
+
+                const std::uintptr_t fieldAddress =
+                    object + offset;
+
+                std::uintptr_t value = 0;
+
+                if (!TryReadValue(
+                        fieldAddress,
+                        value))
+                {
+                    log << "  +"
+                        << AddressText(offset)
+                        << " = <unreadable>\n";
+                    continue;
+                }
+
+                log << "  +"
+                    << AddressText(offset)
+                    << " = "
+                    << AddressText(value);
+
+                if (value == 0)
+                {
+                    log << "\n";
+                    continue;
+                }
+
+                const std::string directText =
+                    ReadString(
+                        value,
+                        128);
+
+                if (LooksLikeDiagnosticText(
+                        directText))
+                {
+                    log << "  -> \""
+                        << directText
+                        << "\"";
+
+                    seenStrings.push_back(value);
+                }
+
+                log << "\n";
+
+                if (!followOneLevel)
+                    continue;
+
+                for (std::uintptr_t nestedOffset = 0;
+                     nestedOffset <= NESTED_MAX_OFFSET;
+                     nestedOffset += FIELD_STEP)
+                {
+                    if (value >
+                        UINTPTR_MAX -
+                        nestedOffset)
+                    {
+                        break;
+                    }
+
+                    std::uintptr_t nestedValue = 0;
+
+                    if (!TryReadValue(
+                            value + nestedOffset,
+                            nestedValue) ||
+                        nestedValue == 0)
+                    {
+                        continue;
+                    }
+
+                    bool alreadySeen = false;
+
+                    for (const std::uintptr_t seen :
+                         seenStrings)
+                    {
+                        if (seen == nestedValue)
+                        {
+                            alreadySeen = true;
+                            break;
+                        }
+                    }
+
+                    if (alreadySeen)
+                        continue;
+
+                    const std::string nestedText =
+                        ReadString(
+                            nestedValue,
+                            128);
+
+                    if (!LooksLikeDiagnosticText(
+                            nestedText))
+                    {
+                        continue;
+                    }
+
+                    seenStrings.push_back(
+                        nestedValue);
+
+                    log << "      -> +"
+                        << AddressText(nestedOffset)
+                        << " = "
+                        << AddressText(nestedValue)
+                        << "  \""
+                        << nestedText
+                        << "\"\n";
+                }
+            }
+
+            log << "\n";
+        }
+
+        void TraceTunerObjectStructure(
             std::ostringstream& log,
             const char* label,
             std::uintptr_t root)
         {
-            // The proven P1 tuner-text path is:
-            //   [root] -> object + 0x28 -> object + 0x44 -> text
-            // Multiplayer may select a sibling object/field for Player 2.
-            // Scan the same two-level object shape for any Rocksmith tuning
-            // strings so the second player's path can be identified from one
-            // pre-song tuner snapshot without touching game memory.
-            constexpr std::uintptr_t MAX_FIELD_OFFSET = 0x200;
-            constexpr std::uintptr_t FIELD_STEP = 0x4;
+            constexpr std::uintptr_t KNOWN_CHILD_OFFSET = 0x28;
+            constexpr std::uintptr_t ROOT_MAX_OFFSET = 0x100;
+            constexpr std::uintptr_t CHILD_MAX_OFFSET = 0x180;
 
             log << label << "\n";
             log << "  root: "
@@ -1093,142 +1250,35 @@ namespace RocksmithTuning
                 << AddressText(rootObject)
                 << "\n";
 
-            std::vector<std::uintptr_t> seenTextAddresses;
-            size_t found = 0;
+            std::uintptr_t knownChild = 0;
 
-            for (std::uintptr_t firstOffset = 0;
-                 firstOffset <= MAX_FIELD_OFFSET;
-                 firstOffset += FIELD_STEP)
+            if (rootObject <=
+                UINTPTR_MAX -
+                KNOWN_CHILD_OFFSET)
             {
-                if (rootObject >
-                    UINTPTR_MAX -
-                    firstOffset)
-                {
-                    break;
-                }
-
-                const std::uintptr_t firstField =
+                TryReadValue(
                     rootObject +
-                    firstOffset;
-
-                std::uintptr_t childObject = 0;
-
-                if (!TryReadValue(
-                        firstField,
-                        childObject) ||
-                    childObject == 0)
-                {
-                    continue;
-                }
-
-                for (std::uintptr_t secondOffset = 0;
-                     secondOffset <= MAX_FIELD_OFFSET;
-                     secondOffset += FIELD_STEP)
-                {
-                    if (childObject >
-                        UINTPTR_MAX -
-                        secondOffset)
-                    {
-                        break;
-                    }
-
-                    const std::uintptr_t secondField =
-                        childObject +
-                        secondOffset;
-
-                    std::uintptr_t textAddress = 0;
-
-                    if (!TryReadValue(
-                            secondField,
-                            textAddress) ||
-                        textAddress == 0)
-                    {
-                        continue;
-                    }
-
-                    bool alreadySeen = false;
-
-                    for (const std::uintptr_t seen :
-                         seenTextAddresses)
-                    {
-                        if (seen == textAddress)
-                        {
-                            alreadySeen = true;
-                            break;
-                        }
-                    }
-
-                    if (alreadySeen)
-                        continue;
-
-                    const std::string text =
-                        ReadString(
-                            textAddress,
-                            128);
-
-                    if (text.empty())
-                        continue;
-
-                    Tuning candidate{};
-
-                    if (!TryLookupTuningText(
-                            text,
-                            candidate))
-                    {
-                        continue;
-                    }
-
-                    seenTextAddresses.push_back(
-                        textAddress);
-
-                    ++found;
-
-                    log << "  candidate "
-                        << found
-                        << ": rootObject + "
-                        << AddressText(firstOffset)
-                        << " -> child "
-                        << AddressText(childObject)
-                        << " + "
-                        << AddressText(secondOffset)
-                        << " -> text "
-                        << AddressText(textAddress)
-                        << "\n";
-
-                    log << "    text: "
-                        << text
-                        << "\n";
-
-                    log << "    tuning: [";
-
-                    for (size_t i = 0;
-                         i < candidate.strings.size();
-                         ++i)
-                    {
-                        if (i != 0)
-                            log << ',';
-
-                        log << candidate.strings[i];
-                    }
-
-                    log << "]";
-
-                    if (firstOffset == 0x28 &&
-                        secondOffset == 0x44)
-                    {
-                        log << "  <known P1 path>";
-                    }
-
-                    log << "\n";
-                }
+                        KNOWN_CHILD_OFFSET,
+                    knownChild);
             }
 
-            if (found == 0)
-            {
-                log << "  no tuning-text candidates found";
-            }
+            log << "  known child (root + 0x28): "
+                << AddressText(knownChild)
+                << "\n\n";
 
-            log << "\n\n";
+            TraceObjectFieldMap(
+                log,
+                "ROOT OBJECT FIELD MAP",
+                rootObject,
+                ROOT_MAX_OFFSET,
+                true);
+
+            TraceObjectFieldMap(
+                log,
+                "KNOWN TUNER CHILD FIELD MAP",
+                knownChild,
+                CHILD_MAX_OFFSET,
+                true);
         }
 
         bool TryReadArrangementMemory(
@@ -1408,17 +1458,17 @@ namespace RocksmithTuning
         if (GetExecutableVersion() ==
             ExecutableVersion::LearnAndPlay2024)
         {
-            TraceTunerTextCandidates(
+            TraceTunerObjectStructure(
                 log,
-                "MULTIPLAYER TUNER TEXT CANDIDATES - configured 2024 root",
+                "TUNER OBJECT STRUCTURE - configured 2024 root",
                 base +
                     TUNER_TEXT_2024_ROOT_OFFSET);
         }
         else
         {
-            TraceTunerTextCandidates(
+            TraceTunerObjectStructure(
                 log,
-                "MULTIPLAYER TUNER TEXT CANDIDATES - configured 2022 root",
+                "TUNER OBJECT STRUCTURE - configured 2022 root",
                 base +
                     TUNER_TEXT_2022_ROOT);
         }
