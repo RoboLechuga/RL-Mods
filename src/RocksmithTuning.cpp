@@ -1201,35 +1201,46 @@ namespace RocksmithTuning
 
     bool CaptureDebugSnapshot()
     {
-        // V3 keeps the V2 process-wide locator idea, but never dereferences
-        // arbitrary Rocksmith pages directly. Every bulk scan operates on a
-        // local snapshot copied with ReadProcessMemory. Rocksmith allocates and
-        // releases heap pages continuously; a page that was readable when
-        // VirtualQuery ran can disappear before a raw pointer loop reaches it.
-        constexpr size_t MAX_STRING_LENGTH = 64;
-        constexpr size_t MAX_TUNING_HITS = 256;
-        constexpr size_t MAX_STRING_REFERENCES = 2048;
-        constexpr size_t MAX_OBJECT_REFERENCES = 2048;
-        constexpr std::uintptr_t UI_TEXT_FIELD_OFFSET = 0x44;
-        constexpr size_t UI_OBJECT_INSPECT_BYTES = 0xA0;
-        constexpr size_t ROOT_INSPECT_BYTES = 0x300;
+        // V4 is deliberately narrow. The current multiplayer song has the
+        // same custom tuning for P1 and P2: B F# B E G# C#.
+        // Relative to E standard that is [-5,-3,-3,-3,-3,-3].
+        // Earlier builder diagnostics proved that the live target object keeps
+        // six int32 semitone offsets at +0x50 and the matching MIDI notes at
+        // +0x38. Find that exact structure without hooks or code patching.
+        constexpr std::array<std::int32_t, 6> TARGET_OFFSETS =
+        {
+            -5, -3, -3, -3, -3, -3
+        };
+
+        constexpr std::array<std::int32_t, 6> TARGET_MIDI =
+        {
+            35, 42, 47, 52, 56, 61
+        };
+
+        constexpr std::uintptr_t TARGET_FIELD_OFFSET = 0x50;
+        constexpr std::uintptr_t MIDI_FIELD_OFFSET = 0x38;
         constexpr size_t SCAN_CHUNK_BYTES = 0x4000;
-        constexpr size_t STRING_OVERLAP_BYTES = 256;
+        constexpr size_t PATTERN_OVERLAP_BYTES =
+            sizeof(TARGET_OFFSETS) - 1;
+        constexpr size_t MAX_PATTERN_HITS = 256;
+        constexpr size_t MAX_POINTER_REFERENCES = 2048;
+        constexpr size_t OWNER_DUMP_BYTES = 0xA0;
+        constexpr size_t ROOT_WALK_BYTES = 0x200;
+        constexpr size_t ROOT_WALK_MAX_NODES = 12000;
+        constexpr int ROOT_WALK_MAX_DEPTH = 5;
 
         struct MemoryRegion
         {
             std::uintptr_t base = 0;
             size_t size = 0;
             DWORD protect = 0;
-            DWORD type = 0;
         };
 
-        struct TuningHit
+        struct PatternHit
         {
-            std::uintptr_t address = 0;
-            bool utf16 = false;
-            std::string text;
-            Tuning tuning{};
+            std::uintptr_t array = 0;
+            std::uintptr_t owner = 0;
+            bool midiMatches = false;
         };
 
         struct PointerReference
@@ -1238,10 +1249,12 @@ namespace RocksmithTuning
             std::uintptr_t target = 0;
         };
 
-        struct UiCandidate
+        struct GraphNode
         {
-            std::uintptr_t base = 0;
-            std::uintptr_t textAddress = 0;
+            std::uintptr_t address = 0;
+            size_t parent = static_cast<size_t>(-1);
+            std::uintptr_t viaOffset = 0;
+            int depth = 0;
         };
 
         const HANDLE process = GetCurrentProcess();
@@ -1283,58 +1296,8 @@ namespace RocksmithTuning
                     return false;
                 }
 
-                value =
-                    static_cast<std::uintptr_t>(raw);
+                value = static_cast<std::uintptr_t>(raw);
                 return true;
-            };
-
-        auto safeReadText =
-            [process](
-                std::uintptr_t address,
-                size_t maxLength = 128) -> std::string
-            {
-                if (!address || maxLength == 0)
-                    return {};
-
-                std::vector<char> buffer(
-                    maxLength + 1,
-                    0);
-
-                SIZE_T copied = 0;
-
-                if (!ReadProcessMemory(
-                        process,
-                        reinterpret_cast<const void*>(address),
-                        buffer.data(),
-                        maxLength,
-                        &copied) ||
-                    copied == 0)
-                {
-                    return {};
-                }
-
-                std::string result;
-                result.reserve(copied);
-
-                for (SIZE_T i = 0;
-                     i < copied;
-                     ++i)
-                {
-                    const unsigned char value =
-                        static_cast<unsigned char>(
-                            buffer[i]);
-
-                    if (value == 0)
-                        break;
-
-                    if (value < 32 || value > 126)
-                        return {};
-
-                    result.push_back(
-                        static_cast<char>(value));
-                }
-
-                return result;
             };
 
         auto regionReadable =
@@ -1370,22 +1333,6 @@ namespace RocksmithTuning
                 return (protect & executable) != 0;
             };
 
-        auto memoryTypeName =
-            [](DWORD type) -> const char*
-            {
-                switch (type)
-                {
-                case MEM_PRIVATE:
-                    return "PRIVATE";
-                case MEM_MAPPED:
-                    return "MAPPED";
-                case MEM_IMAGE:
-                    return "IMAGE";
-                default:
-                    return "OTHER";
-                }
-            };
-
         auto collectPrivateRegions =
             [&regionReadable,
              &regionExecutable]()
@@ -1419,11 +1366,9 @@ namespace RocksmithTuning
                     const std::uintptr_t regionBase =
                         reinterpret_cast<std::uintptr_t>(
                             mbi.BaseAddress);
-
                     const std::uintptr_t regionSize =
                         static_cast<std::uintptr_t>(
                             mbi.RegionSize);
-
                     const std::uintptr_t next =
                         regionBase + regionSize;
 
@@ -1438,8 +1383,7 @@ namespace RocksmithTuning
                             {
                                 regionBase,
                                 static_cast<size_t>(regionSize),
-                                mbi.Protect,
-                                mbi.Type
+                                mbi.Protect
                             });
                     }
 
@@ -1449,38 +1393,97 @@ namespace RocksmithTuning
                 return regions;
             };
 
-        auto logUiField =
-            [&safeReadPointer,
-             &safeReadText](
-                std::ostringstream& log,
-                std::uintptr_t base,
-                std::uintptr_t offset,
-                const char* label)
+        auto isPrivateReadablePointer =
+            [&regionReadable,
+             &regionExecutable](
+                std::uintptr_t address) -> bool
             {
-                std::uintptr_t pointer = 0;
+                if (!address)
+                    return false;
 
-                log << "    " << label
-                    << " +"
-                    << AddressText(offset)
-                    << ": ";
+                MEMORY_BASIC_INFORMATION mbi{};
 
-                if (!safeReadPointer(
-                        base + offset,
-                        pointer))
+                if (!VirtualQuery(
+                        reinterpret_cast<const void*>(address),
+                        &mbi,
+                        sizeof(mbi)))
                 {
-                    log << "<unreadable>\n";
-                    return;
+                    return false;
                 }
 
-                log << AddressText(pointer);
+                return
+                    mbi.Type == MEM_PRIVATE &&
+                    regionReadable(mbi) &&
+                    !regionExecutable(mbi.Protect);
+            };
 
-                const std::string text =
-                    safeReadText(pointer);
+        auto readObjectBytes =
+            [process,
+             &regionReadable,
+             &regionExecutable](
+                std::uintptr_t address,
+                size_t wanted,
+                std::vector<std::uint8_t>& buffer)
+                -> size_t
+            {
+                buffer.clear();
 
-                if (!text.empty())
-                    log << " -> \"" << text << "\"";
+                if (!address || wanted == 0)
+                    return 0;
 
-                log << "\n";
+                MEMORY_BASIC_INFORMATION mbi{};
+
+                if (!VirtualQuery(
+                        reinterpret_cast<const void*>(address),
+                        &mbi,
+                        sizeof(mbi)) ||
+                    mbi.Type != MEM_PRIVATE ||
+                    !regionReadable(mbi) ||
+                    regionExecutable(mbi.Protect))
+                {
+                    return 0;
+                }
+
+                const std::uintptr_t regionStart =
+                    reinterpret_cast<std::uintptr_t>(
+                        mbi.BaseAddress);
+                const std::uintptr_t regionEnd =
+                    regionStart +
+                    static_cast<std::uintptr_t>(
+                        mbi.RegionSize);
+
+                if (address < regionStart ||
+                    address >= regionEnd)
+                {
+                    return 0;
+                }
+
+                const size_t available =
+                    static_cast<size_t>(regionEnd - address);
+                const size_t bytes =
+                    (std::min)(wanted, available);
+
+                if (bytes == 0)
+                    return 0;
+
+                buffer.resize(bytes);
+                SIZE_T copied = 0;
+
+                if (!ReadProcessMemory(
+                        process,
+                        reinterpret_cast<const void*>(address),
+                        buffer.data(),
+                        bytes,
+                        &copied) ||
+                    copied == 0)
+                {
+                    buffer.clear();
+                    return 0;
+                }
+
+                buffer.resize(
+                    static_cast<size_t>(copied));
+                return buffer.size();
             };
 
         SYSTEMTIME now{};
@@ -1489,8 +1492,8 @@ namespace RocksmithTuning
         std::ostringstream log;
 
         log << "============================================================\n";
-        log << "RL-Mods multiplayer tuner process text locator\n";
-        log << "BUILD: MP_UI_TEXT_V3_SAFE_SNAPSHOT\n";
+        log << "RL-Mods multiplayer tuner exact target locator\n";
+        log << "BUILD: MP_TARGET_V4_CSHARP_DROP_B_EXACT\n";
         log << std::setfill('0')
             << std::dec
             << now.wYear << '-'
@@ -1505,6 +1508,8 @@ namespace RocksmithTuning
             << "\n";
         log << "Builder hook: DISABLED\n";
         log << "Bulk memory reads: ReadProcessMemory snapshots\n";
+        log << "Expected P1/P2 offsets: [-5,-3,-3,-3,-3,-3]\n";
+        log << "Expected MIDI: [35,42,47,52,56,61]\n\n";
 
         HMODULE gameModule =
             GetModuleHandleW(nullptr);
@@ -1512,7 +1517,6 @@ namespace RocksmithTuning
         std::uintptr_t rootSlot = 0;
         std::uintptr_t rootObject = 0;
         std::uintptr_t knownChild = 0;
-        std::uintptr_t knownText = 0;
 
         if (gameModule)
         {
@@ -1527,24 +1531,13 @@ namespace RocksmithTuning
                 : TUNER_TEXT_2022_ROOT;
 
             rootSlot = base + rootOffset;
-
-            safeReadPointer(
-                rootSlot,
-                rootObject);
+            safeReadPointer(rootSlot, rootObject);
 
             if (rootObject)
             {
                 safeReadPointer(
                     rootObject + 0x28,
                     knownChild);
-
-                if (knownChild)
-                {
-                    safeReadPointer(
-                        knownChild +
-                            UI_TEXT_FIELD_OFFSET,
-                        knownText);
-                }
             }
         }
 
@@ -1556,23 +1549,12 @@ namespace RocksmithTuning
             << "\n";
         log << "Known SP child *(root+0x28): "
             << AddressText(knownChild)
-            << "\n";
-        log << "Known SP text *(child+0x44): "
-            << AddressText(knownText);
-
-        const std::string knownTextValue =
-            safeReadText(knownText);
-
-        if (!knownTextValue.empty())
-            log << " -> \"" << knownTextValue << "\"";
-
-        log << "\n\n";
+            << "\n\n";
 
         const std::vector<MemoryRegion> regions =
             collectPrivateRegions();
 
         size_t totalPrivateBytes = 0;
-
         for (const auto& region : regions)
             totalPrivateBytes += region.size;
 
@@ -1580,77 +1562,36 @@ namespace RocksmithTuning
         log << "  regions: " << regions.size() << "\n";
         log << "  bytes: " << totalPrivateBytes << "\n\n";
 
-        std::vector<TuningHit> tuningHits;
+        std::vector<PatternHit> hits;
         std::unordered_set<std::uintptr_t> hitAddresses;
-
-        auto addHit =
-            [&tuningHits,
-             &hitAddresses](
-                std::uintptr_t address,
-                bool utf16,
-                const std::string& text)
-            {
-                if (tuningHits.size() >=
-                    MAX_TUNING_HITS)
-                {
-                    return;
-                }
-
-                if (hitAddresses.find(address) !=
-                    hitAddresses.end())
-                {
-                    return;
-                }
-
-                Tuning parsed{};
-
-                if (!TryLookupTuningText(
-                        text,
-                        parsed))
-                {
-                    return;
-                }
-
-                hitAddresses.insert(address);
-                tuningHits.push_back(
-                    {
-                        address,
-                        utf16,
-                        text,
-                        parsed
-                    });
-            };
-
         std::vector<std::uint8_t> scanBuffer;
 
-        // Pass 1: snapshot each small chunk into our own buffer before looking
-        // for ASCII/UTF-16 tuning names. The overlap keeps a short string that
-        // crosses a chunk boundary visible to at least one scan.
+        const void* targetBytes =
+            static_cast<const void*>(
+                TARGET_OFFSETS.data());
+
         for (const auto& region : regions)
         {
-            if (tuningHits.size() >=
-                MAX_TUNING_HITS)
-            {
-                break;
-            }
-
             for (size_t regionOffset = 0;
                  regionOffset < region.size &&
-                 tuningHits.size() < MAX_TUNING_HITS;)
+                 hits.size() < MAX_PATTERN_HITS;)
             {
                 const size_t primaryBytes =
                     (std::min)(
                         SCAN_CHUNK_BYTES,
                         region.size - regionOffset);
 
-                const size_t requestedBytes =
+                const size_t extraBytes =
                     (std::min)(
-                        primaryBytes +
-                            STRING_OVERLAP_BYTES,
-                        region.size - regionOffset);
+                        PATTERN_OVERLAP_BYTES,
+                        region.size -
+                            regionOffset -
+                            primaryBytes);
 
-                scanBuffer.resize(requestedBytes);
+                const size_t requested =
+                    primaryBytes + extraBytes;
 
+                scanBuffer.resize(requested);
                 SIZE_T copied = 0;
 
                 if (!ReadProcessMemory(
@@ -1658,9 +1599,9 @@ namespace RocksmithTuning
                         reinterpret_cast<const void*>(
                             region.base + regionOffset),
                         scanBuffer.data(),
-                        requestedBytes,
+                        requested,
                         &copied) ||
-                    copied == 0)
+                    copied < sizeof(TARGET_OFFSETS))
                 {
                     regionOffset += primaryBytes;
                     continue;
@@ -1669,419 +1610,207 @@ namespace RocksmithTuning
                 const size_t available =
                     static_cast<size_t>(copied);
 
-                for (size_t i = 0;
-                     i < primaryBytes &&
-                     i < available &&
-                     tuningHits.size() < MAX_TUNING_HITS;)
+                size_t i = 0;
+                while (i < primaryBytes &&
+                       ((region.base + regionOffset + i) & 3u))
                 {
-                    const std::uint8_t first =
-                        scanBuffer[i];
-
-                    if (first < 32 || first > 126)
-                    {
-                        ++i;
-                        continue;
-                    }
-
-                    if (i > 0 &&
-                        scanBuffer[i - 1] >= 32 &&
-                        scanBuffer[i - 1] <= 126)
-                    {
-                        ++i;
-                        continue;
-                    }
-
-                    std::string candidate;
-                    candidate.reserve(MAX_STRING_LENGTH);
-
-                    size_t cursor = i;
-
-                    while (cursor < available &&
-                           candidate.size() <
-                               MAX_STRING_LENGTH)
-                    {
-                        const std::uint8_t c =
-                            scanBuffer[cursor];
-
-                        if (c == 0)
-                            break;
-
-                        if (c < 32 || c > 126)
-                            break;
-
-                        candidate.push_back(
-                            static_cast<char>(c));
-                        ++cursor;
-                    }
-
-                    if (candidate.size() >= 4 &&
-                        cursor < available &&
-                        scanBuffer[cursor] == 0)
-                    {
-                        addHit(
-                            region.base +
-                                regionOffset + i,
-                            false,
-                            candidate);
-                    }
-
-                    i = cursor > i
-                        ? cursor + 1
-                        : i + 1;
+                    ++i;
                 }
 
-                for (size_t i = 0;
-                     i + 1 < primaryBytes &&
-                     i + 1 < available &&
-                     tuningHits.size() < MAX_TUNING_HITS;
-                     ++i)
+                for (;
+                     i < primaryBytes &&
+                     i + sizeof(TARGET_OFFSETS) <= available &&
+                     hits.size() < MAX_PATTERN_HITS;
+                     i += sizeof(std::uint32_t))
                 {
-                    const std::uintptr_t absolute =
+                    if (std::memcmp(
+                            scanBuffer.data() + i,
+                            targetBytes,
+                            sizeof(TARGET_OFFSETS)) != 0)
+                    {
+                        continue;
+                    }
+
+                    const std::uintptr_t arrayAddress =
                         region.base + regionOffset + i;
 
-                    if (absolute & 1u)
-                        continue;
-
-                    if (scanBuffer[i] < 32 ||
-                        scanBuffer[i] > 126 ||
-                        scanBuffer[i + 1] != 0)
+                    if (!hitAddresses.insert(
+                            arrayAddress).second)
                     {
                         continue;
                     }
 
-                    if (i >= 2 &&
-                        scanBuffer[i - 2] >= 32 &&
-                        scanBuffer[i - 2] <= 126 &&
-                        scanBuffer[i - 1] == 0)
+                    PatternHit hit{};
+                    hit.array = arrayAddress;
+
+                    if (arrayAddress >= TARGET_FIELD_OFFSET)
                     {
-                        continue;
+                        hit.owner =
+                            arrayAddress - TARGET_FIELD_OFFSET;
+
+                        std::array<std::int32_t, 6> midi{};
+
+                        if (safeRead(
+                                hit.owner + MIDI_FIELD_OFFSET,
+                                midi.data(),
+                                sizeof(midi)) &&
+                            midi == TARGET_MIDI)
+                        {
+                            hit.midiMatches = true;
+                        }
                     }
 
-                    std::string candidate;
-                    candidate.reserve(MAX_STRING_LENGTH);
-
-                    size_t cursor = i;
-
-                    while (cursor + 1 < available &&
-                           candidate.size() <
-                               MAX_STRING_LENGTH &&
-                           scanBuffer[cursor] >= 32 &&
-                           scanBuffer[cursor] <= 126 &&
-                           scanBuffer[cursor + 1] == 0)
-                    {
-                        candidate.push_back(
-                            static_cast<char>(
-                                scanBuffer[cursor]));
-                        cursor += 2;
-                    }
-
-                    if (candidate.size() >= 4 &&
-                        cursor + 1 < available &&
-                        scanBuffer[cursor] == 0 &&
-                        scanBuffer[cursor + 1] == 0)
-                    {
-                        addHit(
-                            absolute,
-                            true,
-                            candidate);
-                    }
+                    hits.push_back(hit);
                 }
 
                 regionOffset += primaryBytes;
             }
+
+            if (hits.size() >= MAX_PATTERN_HITS)
+                break;
         }
 
-        std::sort(
-            tuningHits.begin(),
-            tuningHits.end(),
-            [](const TuningHit& a,
-               const TuningHit& b)
-            {
-                return a.address < b.address;
-            });
+        log << "EXACT OFFSET ARRAY HITS\n";
+        log << "  count: " << hits.size() << "\n";
 
-        log << "PROCESS-WIDE TUNING TEXT HITS\n";
-        log << "  count: "
-            << tuningHits.size()
-            << "\n";
+        size_t validatedCount = 0;
+        std::unordered_map<std::uintptr_t, std::string> targetLabels;
 
-        for (size_t i = 0;
-             i < tuningHits.size();
-             ++i)
+        for (size_t i = 0; i < hits.size(); ++i)
         {
-            const auto& hit = tuningHits[i];
-
-            MEMORY_BASIC_INFORMATION mbi{};
-            VirtualQuery(
-                reinterpret_cast<const void*>(
-                    hit.address),
-                &mbi,
-                sizeof(mbi));
+            const PatternHit& hit = hits[i];
 
             log << "  HIT " << (i + 1)
-                << " "
-                << (hit.utf16
-                    ? "UTF16"
-                    : "ASCII")
-                << " @ "
-                << AddressText(hit.address)
-                << " type="
-                << memoryTypeName(mbi.Type)
-                << " text=\""
-                << hit.text
-                << "\" -> "
-                << VectorText(hit.tuning)
-                << " / "
-                << Name(hit.tuning);
+                << " array=" << AddressText(hit.array)
+                << " owner(-0x50)=" << AddressText(hit.owner)
+                << " midi@owner+0x38="
+                << (hit.midiMatches ? "MATCH" : "no")
+                << "\n";
 
-            if (hit.address == knownText)
-                log << "  <KNOWN SP TEXT>";
+            targetLabels[hit.array] =
+                std::string("array#") +
+                std::to_string(i + 1);
 
-            log << "\n";
-        }
-
-        if (tuningHits.empty())
-        {
-            log << "  No tuning-looking strings found in private memory.\n";
-        }
-
-        log << "\n";
-
-        std::unordered_map<
-            std::uintptr_t,
-            size_t> hitIndex;
-
-        for (size_t i = 0;
-             i < tuningHits.size();
-             ++i)
-        {
-            hitIndex[
-                tuningHits[i].address] = i;
-        }
-
-        std::vector<PointerReference> stringReferences;
-
-        // Pass 2: find dwords that point directly to any tuning-text hit, but
-        // search the copied snapshot rather than dereferencing process memory.
-        if (!hitIndex.empty())
-        {
-            for (const auto& region : regions)
+            if (hit.midiMatches)
             {
-                for (size_t regionOffset = 0;
-                     regionOffset < region.size &&
-                     stringReferences.size() <
-                         MAX_STRING_REFERENCES;)
-                {
-                    const size_t primaryBytes =
-                        (std::min)(
-                            SCAN_CHUNK_BYTES,
-                            region.size - regionOffset);
-
-                    scanBuffer.resize(primaryBytes);
-                    SIZE_T copied = 0;
-
-                    if (!ReadProcessMemory(
-                            process,
-                            reinterpret_cast<const void*>(
-                                region.base + regionOffset),
-                            scanBuffer.data(),
-                            primaryBytes,
-                            &copied) ||
-                        copied < sizeof(std::uint32_t))
-                    {
-                        regionOffset += primaryBytes;
-                        continue;
-                    }
-
-                    const size_t available =
-                        static_cast<size_t>(copied);
-
-                    size_t i = 0;
-
-                    while (i < available &&
-                           ((region.base +
-                             regionOffset + i) & 3u))
-                    {
-                        ++i;
-                    }
-
-                    for (;
-                         i + sizeof(std::uint32_t) <=
-                             available &&
-                         stringReferences.size() <
-                             MAX_STRING_REFERENCES;
-                         i += sizeof(std::uint32_t))
-                    {
-                        std::uint32_t raw = 0;
-                        std::memcpy(
-                            &raw,
-                            scanBuffer.data() + i,
-                            sizeof(raw));
-
-                        const std::uintptr_t value =
-                            static_cast<std::uintptr_t>(raw);
-
-                        if (hitIndex.find(value) ==
-                            hitIndex.end())
-                        {
-                            continue;
-                        }
-
-                        stringReferences.push_back(
-                            {
-                                region.base +
-                                    regionOffset + i,
-                                value
-                            });
-                    }
-
-                    regionOffset += primaryBytes;
-                }
-
-                if (stringReferences.size() >=
-                    MAX_STRING_REFERENCES)
-                {
-                    break;
-                }
+                ++validatedCount;
+                targetLabels[hit.owner] =
+                    std::string("VALIDATED-owner#") +
+                    std::to_string(i + 1);
             }
         }
 
-        log << "POINTER REFERENCES TO TUNING TEXT\n";
-        log << "  count: "
-            << stringReferences.size()
-            << "\n";
+        // Once the +0x38 MIDI signature validates an owner, ignore unrelated
+        // copies of the same six semitone values for the expensive reference
+        // and root-walk passes. If validation somehow finds none, fall back to
+        // the raw exact-array hits so the dump is still diagnostic.
+        std::unordered_set<std::uintptr_t> interestingTargets;
 
-        std::vector<UiCandidate> uiCandidates;
-        std::unordered_set<std::uintptr_t>
-            candidateBases;
-
-        for (const auto& reference :
-             stringReferences)
+        if (validatedCount > 0)
         {
-            const auto hitIt =
-                hitIndex.find(reference.target);
-
-            if (hitIt == hitIndex.end())
-                continue;
-
-            const TuningHit& hit =
-                tuningHits[hitIt->second];
-
-            log << "  REF "
-                << AddressText(reference.location)
-                << " -> "
-                << AddressText(reference.target)
-                << " \""
-                << hit.text
-                << "\"";
-
-            if (reference.location >=
-                UI_TEXT_FIELD_OFFSET)
+            for (const auto& hit : hits)
             {
-                const std::uintptr_t candidateBase =
-                    reference.location -
-                    UI_TEXT_FIELD_OFFSET;
+                if (!hit.midiMatches)
+                    continue;
 
-                MEMORY_BASIC_INFORMATION mbi{};
-
-                if (VirtualQuery(
-                        reinterpret_cast<const void*>(
-                            candidateBase),
-                        &mbi,
-                        sizeof(mbi)) &&
-                    mbi.State == MEM_COMMIT &&
-                    !(mbi.Protect & PAGE_GUARD) &&
-                    !(mbi.Protect & PAGE_NOACCESS))
-                {
-                    log << "  candidateBase="
-                        << AddressText(candidateBase);
-
-                    if (candidateBase == knownChild)
-                        log << " <KNOWN SP CHILD>";
-
-                    if (candidateBases.insert(
-                            candidateBase).second)
-                    {
-                        uiCandidates.push_back(
-                            {
-                                candidateBase,
-                                reference.target
-                            });
-                    }
-                }
+                interestingTargets.insert(hit.array);
+                interestingTargets.insert(hit.owner);
             }
-
-            log << "\n";
+        }
+        else
+        {
+            for (const auto& hit : hits)
+                interestingTargets.insert(hit.array);
         }
 
-        if (stringReferences.empty())
+        if (hits.empty())
             log << "  none\n";
 
-        log << "\nP1-STYLE +0x44 UI OBJECT CANDIDATES\n";
-        log << "  count: "
-            << uiCandidates.size()
-            << "\n";
+        log << "  validated owner count: "
+            << validatedCount
+            << "\n\n";
 
-        for (size_t i = 0;
-             i < uiCandidates.size();
-             ++i)
+        log << "VALIDATED OWNER DWORD DUMPS\n";
+
+        for (size_t i = 0; i < hits.size(); ++i)
         {
-            const auto& candidate =
-                uiCandidates[i];
+            const PatternHit& hit = hits[i];
+            if (!hit.midiMatches)
+                continue;
 
-            log << "  CANDIDATE "
-                << (i + 1)
-                << " base="
-                << AddressText(candidate.base);
+            std::vector<std::uint8_t> ownerBytes;
+            const size_t bytes =
+                readObjectBytes(
+                    hit.owner,
+                    OWNER_DUMP_BYTES,
+                    ownerBytes);
 
-            if (candidate.base == knownChild)
-                log << " <KNOWN SP CHILD>";
+            log << "  OWNER " << (i + 1)
+                << " " << AddressText(hit.owner)
+                << " target=" << AddressText(hit.array)
+                << "\n";
 
-            log << "\n";
+            if (bytes < sizeof(std::uint32_t))
+            {
+                log << "    <unreadable>\n";
+                continue;
+            }
 
-            logUiField(
-                log,
-                candidate.base,
-                0x44,
-                "text");
-            logUiField(
-                log,
-                candidate.base,
-                0x5C,
-                "reference");
-            logUiField(
-                log,
-                candidate.base,
-                0x74,
-                "previous/menu");
-            logUiField(
-                log,
-                candidate.base,
-                0x8C,
-                "current menu");
+            for (size_t offset = 0;
+                 offset + sizeof(std::uint32_t) <= bytes;
+                 offset += sizeof(std::uint32_t))
+            {
+                std::uint32_t raw = 0;
+                std::memcpy(
+                    &raw,
+                    ownerBytes.data() + offset,
+                    sizeof(raw));
+
+                log << "    +"
+                    << AddressText(offset)
+                    << " = "
+                    << AddressText(
+                        static_cast<std::uintptr_t>(raw));
+
+                if (offset >= MIDI_FIELD_OFFSET &&
+                    offset < MIDI_FIELD_OFFSET +
+                        sizeof(TARGET_MIDI))
+                {
+                    log << "  <MIDI>";
+                }
+
+                if (offset >= TARGET_FIELD_OFFSET &&
+                    offset < TARGET_FIELD_OFFSET +
+                        sizeof(TARGET_OFFSETS))
+                {
+                    log << "  <OFFSET>";
+                }
+
+                if (static_cast<std::uintptr_t>(raw) ==
+                    hit.array)
+                {
+                    log << "  *** SELF TARGET POINTER";
+                }
+
+                log << "\n";
+            }
         }
+
+        if (validatedCount == 0)
+            log << "  none\n";
 
         log << "\n";
 
-        std::unordered_set<std::uintptr_t>
-            objectTargets;
+        std::vector<PointerReference> references;
 
-        for (const auto& candidate :
-             uiCandidates)
-        {
-            objectTargets.insert(candidate.base);
-        }
-
-        std::vector<PointerReference> objectReferences;
-
-        if (!objectTargets.empty())
+        if (!interestingTargets.empty())
         {
             for (const auto& region : regions)
             {
                 for (size_t regionOffset = 0;
                      regionOffset < region.size &&
-                     objectReferences.size() <
-                         MAX_OBJECT_REFERENCES;)
+                     references.size() <
+                         MAX_POINTER_REFERENCES;)
                 {
                     const size_t primaryBytes =
                         (std::min)(
@@ -2107,41 +1836,37 @@ namespace RocksmithTuning
                     const size_t available =
                         static_cast<size_t>(copied);
 
-                    size_t i = 0;
-
-                    while (i < available &&
-                           ((region.base +
-                             regionOffset + i) & 3u))
+                    size_t j = 0;
+                    while (j < available &&
+                           ((region.base + regionOffset + j) & 3u))
                     {
-                        ++i;
+                        ++j;
                     }
 
                     for (;
-                         i + sizeof(std::uint32_t) <=
-                             available &&
-                         objectReferences.size() <
-                             MAX_OBJECT_REFERENCES;
-                         i += sizeof(std::uint32_t))
+                         j + sizeof(std::uint32_t) <= available &&
+                         references.size() <
+                             MAX_POINTER_REFERENCES;
+                         j += sizeof(std::uint32_t))
                     {
                         std::uint32_t raw = 0;
                         std::memcpy(
                             &raw,
-                            scanBuffer.data() + i,
+                            scanBuffer.data() + j,
                             sizeof(raw));
 
                         const std::uintptr_t value =
                             static_cast<std::uintptr_t>(raw);
 
-                        if (objectTargets.find(value) ==
-                            objectTargets.end())
+                        if (interestingTargets.find(value) ==
+                            interestingTargets.end())
                         {
                             continue;
                         }
 
-                        objectReferences.push_back(
+                        references.push_back(
                             {
-                                region.base +
-                                    regionOffset + i,
+                                region.base + regionOffset + j,
                                 value
                             });
                     }
@@ -2149,70 +1874,231 @@ namespace RocksmithTuning
                     regionOffset += primaryBytes;
                 }
 
-                if (objectReferences.size() >=
-                    MAX_OBJECT_REFERENCES)
+                if (references.size() >=
+                    MAX_POINTER_REFERENCES)
                 {
                     break;
                 }
             }
         }
 
-        log << "POINTER REFERENCES TO P1-STYLE UI CANDIDATES\n";
-        log << "  count: "
-            << objectReferences.size()
-            << "\n";
+        log << "POINTER REFERENCES TO EXACT ARRAYS / VALIDATED OWNERS\n";
+        log << "  count: " << references.size() << "\n";
 
-        for (const auto& reference :
-             objectReferences)
+        for (const auto& reference : references)
         {
-            log << "  OBJREF "
+            log << "  REF "
                 << AddressText(reference.location)
                 << " -> "
                 << AddressText(reference.target);
 
+            const auto labelIt =
+                targetLabels.find(reference.target);
+            if (labelIt != targetLabels.end())
+                log << " " << labelIt->second;
+
             if (rootObject &&
                 reference.location >= rootObject &&
-                reference.location <
-                    rootObject + ROOT_INSPECT_BYTES)
+                reference.location < rootObject + 0x1000)
             {
-                log << "  *** DIRECT ROOT +"
+                log << "  *** ROOT +"
                     << AddressText(
-                        reference.location -
-                        rootObject);
+                        reference.location - rootObject);
             }
 
             if (knownChild &&
                 reference.location >= knownChild &&
-                reference.location <
-                    knownChild + ROOT_INSPECT_BYTES)
+                reference.location < knownChild + 0x1000)
             {
-                log << "  inside knownChild +"
+                log << "  *** KNOWN CHILD +"
                     << AddressText(
-                        reference.location -
-                        knownChild);
+                        reference.location - knownChild);
+            }
+
+            for (size_t i = 0; i < hits.size(); ++i)
+            {
+                if (!hits[i].midiMatches)
+                    continue;
+
+                const std::uintptr_t owner = hits[i].owner;
+                if (reference.location >= owner &&
+                    reference.location < owner + 0x200)
+                {
+                    log << "  inside owner#"
+                        << (i + 1)
+                        << " +"
+                        << AddressText(
+                            reference.location - owner);
+                }
             }
 
             log << "\n";
         }
 
-        if (objectReferences.empty())
+        if (references.empty())
             log << "  none\n";
 
+        log << "\nTARGETED FORWARD WALK FROM TUNER ROOT\n";
+
+        std::vector<GraphNode> graph;
+        std::deque<size_t> queue;
+        std::unordered_set<std::uintptr_t> visited;
+        size_t graphMatches = 0;
+
+        if (rootObject &&
+            isPrivateReadablePointer(rootObject))
+        {
+            graph.push_back(
+                {
+                    rootObject,
+                    static_cast<size_t>(-1),
+                    0,
+                    0
+                });
+            queue.push_back(0);
+            visited.insert(rootObject);
+        }
+
+        auto logGraphPath =
+            [&log,
+             &graph,
+             &targetLabels](
+                size_t nodeIndex,
+                std::uintptr_t fieldOffset,
+                std::uintptr_t target)
+            {
+                std::vector<std::uintptr_t> offsets;
+                size_t current = nodeIndex;
+
+                while (current !=
+                       static_cast<size_t>(-1))
+                {
+                    const GraphNode& node =
+                        graph[current];
+
+                    if (node.parent !=
+                        static_cast<size_t>(-1))
+                    {
+                        offsets.push_back(
+                            node.viaOffset);
+                    }
+
+                    current = node.parent;
+                }
+
+                std::reverse(
+                    offsets.begin(),
+                    offsets.end());
+
+                log << "  *** FOUND ROOT";
+
+                for (const auto offset : offsets)
+                    log << " -> +" << AddressText(offset);
+
+                log << " -> +"
+                    << AddressText(fieldOffset)
+                    << " -> "
+                    << AddressText(target);
+
+                const auto labelIt =
+                    targetLabels.find(target);
+                if (labelIt != targetLabels.end())
+                    log << " " << labelIt->second;
+
+                log << "\n";
+            };
+
+        while (!queue.empty() &&
+               graph.size() < ROOT_WALK_MAX_NODES)
+        {
+            const size_t nodeIndex = queue.front();
+            queue.pop_front();
+
+            const GraphNode node = graph[nodeIndex];
+            std::vector<std::uint8_t> bytes;
+            const size_t copied =
+                readObjectBytes(
+                    node.address,
+                    ROOT_WALK_BYTES,
+                    bytes);
+
+            if (copied < sizeof(std::uint32_t))
+                continue;
+
+            for (size_t offset = 0;
+                 offset + sizeof(std::uint32_t) <= copied;
+                 offset += sizeof(std::uint32_t))
+            {
+                std::uint32_t raw = 0;
+                std::memcpy(
+                    &raw,
+                    bytes.data() + offset,
+                    sizeof(raw));
+
+                const std::uintptr_t value =
+                    static_cast<std::uintptr_t>(raw);
+
+                if (interestingTargets.find(value) !=
+                    interestingTargets.end())
+                {
+                    ++graphMatches;
+                    logGraphPath(
+                        nodeIndex,
+                        offset,
+                        value);
+                }
+
+                if (node.depth >= ROOT_WALK_MAX_DEPTH ||
+                    !isPrivateReadablePointer(value) ||
+                    !visited.insert(value).second)
+                {
+                    continue;
+                }
+
+                graph.push_back(
+                    {
+                        value,
+                        nodeIndex,
+                        static_cast<std::uintptr_t>(offset),
+                        node.depth + 1
+                    });
+
+                queue.push_back(
+                    graph.size() - 1);
+
+                if (graph.size() >=
+                    ROOT_WALK_MAX_NODES)
+                {
+                    break;
+                }
+            }
+        }
+
+        log << "  nodes visited: "
+            << graph.size()
+            << "\n";
+        log << "  exact target matches from root: "
+            << graphMatches
+            << "\n";
+
+        if (graph.size() >= ROOT_WALK_MAX_NODES)
+            log << "  walk stopped at node limit\n";
+
+        if (graphMatches == 0)
+            log << "  no path found within depth/node limits\n";
+
         log << "\nSUMMARY\n";
-        log << "  private regions scanned: "
-            << regions.size()
+        log << "  exact offset arrays: "
+            << hits.size()
             << "\n";
-        log << "  tuning text hits: "
-            << tuningHits.size()
+        log << "  validated +0x50/+0x38 owners: "
+            << validatedCount
             << "\n";
-        log << "  pointers to tuning text: "
-            << stringReferences.size()
+        log << "  pointer references: "
+            << references.size()
             << "\n";
-        log << "  +0x44 UI candidates: "
-            << uiCandidates.size()
-            << "\n";
-        log << "  pointers to UI candidates: "
-            << objectReferences.size()
+        log << "  root-walk exact matches: "
+            << graphMatches
             << "\n";
         log << "============================================================\n\n";
 
@@ -2225,24 +2111,21 @@ namespace RocksmithTuning
         if (_wfopen_s(
                 &file,
                 path.c_str(),
-                L"ab") != 0 ||
+                L"a, ccs=UTF-8") != 0 ||
             !file)
         {
             return false;
         }
 
-        const std::string text =
-            log.str();
+        const std::string text = log.str();
 
-        const size_t written =
-            fwrite(
-                text.data(),
-                1,
-                text.size(),
-                file);
+        std::fwprintf(
+            file,
+            L"%hs",
+            text.c_str());
 
-        fclose(file);
-        return written == text.size();
+        std::fclose(file);
+        return true;
     }
 
     bool TryReadArrangement(
