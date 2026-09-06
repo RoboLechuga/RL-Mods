@@ -1133,7 +1133,13 @@ namespace RocksmithTuning
         {
             volatile LONG sequence = 0;
             std::uintptr_t detection = 0;
-            std::array<int, 6> strings{};
+
+            // The builder call happens before Rocksmith finishes populating the
+            // per-player chart target. Capture the proven address here, then
+            // read the six int32 values later from the worker thread while the
+            // pre-song tuner is active.
+            std::uintptr_t tuningAddress = 0;
+
             LONG playerTag = -1;
             DWORD threadId = 0;
             ULONGLONG tick = 0;
@@ -1223,9 +1229,9 @@ namespace RocksmithTuning
             return true;
         }
 
-        bool TryReadBuilderChartTarget(
+        bool TryCaptureBuilderChartTargetAddress(
             const CONTEXT* context,
-            std::array<int, 6>& strings,
+            std::uintptr_t& tuningAddressOut,
             LONG& playerTagOut)
         {
 #if defined(_M_IX86)
@@ -1246,7 +1252,6 @@ namespace RocksmithTuning
             LONG playerTag = -1;
             LONG confirmedPlayerTag = -1;
             LONG stringCount = 0;
-            LONG rawStrings[6] = {};
 
             __try
             {
@@ -1285,38 +1290,22 @@ namespace RocksmithTuning
                 {
                     return false;
                 }
-
-                for (int i = 0; i < 6; ++i)
-                {
-                    rawStrings[i] =
-                        *reinterpret_cast<const LONG*>(
-                            directTuning +
-                            (i * sizeof(LONG)));
-                }
             }
             __except(EXCEPTION_EXECUTE_HANDLER)
             {
                 return false;
             }
 
-            for (int i = 0; i < 6; ++i)
-            {
-                if (rawStrings[i] < -24 ||
-                    rawStrings[i] > 24)
-                {
-                    return false;
-                }
-
-                strings[i] =
-                    static_cast<int>(
-                        rawStrings[i]);
-            }
-
+            // Do not read the six ints here. The exhaustive capture showed
+            // Rocksmith mutates this array after the reference-builder call.
+            // At the breakpoint P1 can still look like E Standard even when
+            // the settled tuner target is D Standard.
+            tuningAddressOut = directTuning;
             playerTagOut = playerTag;
             return true;
 #else
             (void)context;
-            (void)strings;
+            (void)tuningAddressOut;
             (void)playerTagOut;
             return false;
 #endif
@@ -1329,12 +1318,12 @@ namespace RocksmithTuning
             if (!context || context->Esi == 0)
                 return;
 
-            std::array<int, 6> strings{};
+            std::uintptr_t tuningAddress = 0;
             LONG playerTag = -1;
 
-            if (!TryReadBuilderChartTarget(
+            if (!TryCaptureBuilderChartTargetAddress(
                     context,
-                    strings,
+                    tuningAddress,
                     playerTag))
             {
                 return;
@@ -1352,7 +1341,7 @@ namespace RocksmithTuning
             capture.detection =
                 static_cast<std::uintptr_t>(
                     context->Esi);
-            capture.strings = strings;
+            capture.tuningAddress = tuningAddress;
             capture.playerTag = playerTag;
             capture.threadId =
                 GetCurrentThreadId();
@@ -1518,7 +1507,7 @@ namespace RocksmithTuning
                 return false;
 
             copy.detection = source.detection;
-            copy.strings = source.strings;
+            copy.tuningAddress = source.tuningAddress;
             copy.playerTag = source.playerTag;
             copy.threadId = source.threadId;
             copy.tick = source.tick;
@@ -1533,6 +1522,37 @@ namespace RocksmithTuning
                     0);
 
             return publishedAfter == sequence;
+        }
+
+        bool TryReadCapturedTuning(
+            const TunerTargetCapture& capture,
+            Tuning& tuning)
+        {
+            if (!capture.tuningAddress)
+                return false;
+
+            std::array<int, 6> strings{};
+
+            for (int i = 0; i < 6; ++i)
+            {
+                LONG value = 0;
+
+                if (!TryReadValue(
+                        capture.tuningAddress +
+                            (i * sizeof(LONG)),
+                        value) ||
+                    value < -24 ||
+                    value > 24)
+                {
+                    return false;
+                }
+
+                strings[i] =
+                    static_cast<int>(value);
+            }
+
+            tuning.strings = strings;
+            return true;
         }
 
         bool TryReadCapturedTargetPair(
@@ -1610,9 +1630,16 @@ namespace RocksmithTuning
                 return false;
             }
 
-            playerOne.strings = p1.strings;
-            playerTwo.strings = p2.strings;
-            return true;
+            // Dereference the captured addresses now, after Rocksmith has had
+            // time to populate the per-player chart targets. This function is
+            // called from the normal worker-thread Auto poll, not from VEH.
+            return
+                TryReadCapturedTuning(
+                    p1,
+                    playerOne) &&
+                TryReadCapturedTuning(
+                    p2,
+                    playerTwo);
         }
 
         const char* NoteNameFromOffset(
@@ -1763,7 +1790,7 @@ namespace RocksmithTuning
             << std::setw(2) << now.wMinute << ':'
             << std::setw(2) << now.wSecond
             << "\n";
-        log << "Build: P2_AUTO_TARGET_TEST\n";
+        log << "Build: P2_AUTO_TARGET_TEST_FIX3_DEFERRED_READ\n";
         log << "Current menu: "
             << CurrentMenuName()
             << "\n";
@@ -1803,19 +1830,33 @@ namespace RocksmithTuning
                 continue;
 
             Tuning captured{};
-            captured.strings = capture.strings;
+            const bool targetReadable =
+                TryReadCapturedTuning(
+                    capture,
+                    captured);
 
             log << "  capture " << sequence
                 << ": tag=" << capture.playerTag
                 << " detection=0x"
                 << std::hex << std::uppercase
                 << capture.detection
+                << " tuning=0x"
+                << capture.tuningAddress
                 << std::dec
                 << " thread=" << capture.threadId
-                << " tick=" << capture.tick
-                << " target=" << VectorText(captured)
-                << " / " << Name(captured)
-                << "\n";
+                << " tick=" << capture.tick;
+
+            if (targetReadable)
+            {
+                log << " target=" << VectorText(captured)
+                    << " / " << Name(captured);
+            }
+            else
+            {
+                log << " target=<unreadable>";
+            }
+
+            log << "\n";
         }
 
         Tuning p1{};
