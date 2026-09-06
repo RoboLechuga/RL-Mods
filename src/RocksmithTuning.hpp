@@ -31,23 +31,19 @@ namespace RocksmithTuning
     // was successfully exited forward into the song.
     bool IsSongGameplayMenu(const std::string& menu);
 
-    // Installs the lightweight tuning-reference builder capture used to obtain
-    // independent multiplayer chart targets. Single-player Auto still prefers
-    // the existing displayed tuner-text reader.
+    // Diagnostic-build lifecycle stubs. No builder hook is installed.
     bool InitializeTunerTargetCapture();
     void ShutdownTunerTargetCapture();
 
-    // Player-aware pre-song tuner target reader. Player 0 keeps the proven
-    // single-player tuner-text path and falls back to the builder capture when
-    // multiplayer blanks that text. Player 1 is sourced from the independent
-    // builder capture.
+    // Diagnostic build: Player 0 keeps the original tuner-text reader while
+    // Player 1 intentionally remains unavailable until the MP UI path is mapped.
     bool TryReadTunerTarget(int player, Tuning& tuning);
 
     // Compatibility overload for existing single-player callers.
     bool TryReadTunerTarget(Tuning& tuning);
 
-    // Temporary F10 test snapshot. Appends the currently captured P1/P2 targets
-    // to RLMods_tuning_debug.txt without performing a heap scan.
+    // Temporary F10 diagnostic. Performs a bounded, read-only walk of the tuner
+    // UI object graph and logs printable text/pointer paths.
     bool CaptureDebugSnapshot();
 
     // Legacy/general target reader retained for diagnostics and other callers.

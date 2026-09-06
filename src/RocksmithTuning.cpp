@@ -8,9 +8,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <deque>
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <unordered_set>
+#include <utility>
 
 namespace RocksmithTuning
 {
@@ -1105,542 +1109,8 @@ namespace RocksmithTuning
             return true;
         }
 
-        // Multiplayer chart-target capture.
-        //
-        // The tuning-reference builder receives the player detection object in
-        // ESI. On the arrangement-bearing builder call, stack + 0x20 points to
-        // an arrangement object whose +0x50 field is the authored int32[6]
-        // string tuning. This path was established from a D-standard P1 / E-
-        // standard P2 multiplayer capture, where the two arrays resolved to
-        // [-2,-2,-2,-2,-2,-2] and [0,0,0,0,0,0] respectively.
-        //
-        // The hook only copies a validated six-int target and the detection
-        // identity. No heap scanning or pointer-graph walking occurs in normal
-        // operation.
-        constexpr std::uintptr_t REFERENCE_BUILDER_2022 =
-            0x004DCCB0;
-        constexpr std::uintptr_t REFERENCE_BUILDER_2024_OFFSET =
-            0x002AD930;
-        constexpr std::uintptr_t BUILDER_CHART_OBJECT_STACK_OFFSET =
-            0x20;
-        constexpr std::uintptr_t BUILDER_CHART_TUNING_OFFSET =
-            0x50;
-        constexpr LONG TARGET_CAPTURE_SLOTS = 16;
-        constexpr DWORD TRAP_FLAG = 0x100;
-        constexpr ULONGLONG TARGET_PAIR_MAX_SEPARATION_MS = 250;
-
-        struct TunerTargetCapture
-        {
-            volatile LONG sequence = 0;
-            std::uintptr_t detection = 0;
-
-            // The builder call happens before Rocksmith finishes populating the
-            // per-player chart target. Capture the proven address here, then
-            // read the six int32 values later from the worker thread while the
-            // pre-song tuner is active.
-            std::uintptr_t tuningAddress = 0;
-
-            LONG playerTag = -1;
-            DWORD threadId = 0;
-            ULONGLONG tick = 0;
-        };
-
-        TunerTargetCapture g_targetCaptures[TARGET_CAPTURE_SLOTS]{};
-        volatile LONG g_targetCaptureCount = 0;
-
-        std::uintptr_t g_referenceBuilder = 0;
-        BYTE g_referenceBuilderOriginalByte = 0;
-        PVOID g_targetVehHandle = nullptr;
-        volatile LONG g_targetHookInstalled = 0;
-        __declspec(thread) LONG g_targetSingleStepActive = 0;
-
-        std::uintptr_t ResolveReferenceBuilder()
-        {
-            if (GetExecutableVersion() ==
-                ExecutableVersion::Remastered2022)
-            {
-                return REFERENCE_BUILDER_2022;
-            }
-
-            HMODULE gameModule =
-                GetModuleHandleW(nullptr);
-
-            if (!gameModule)
-                return 0;
-
-            return
-                reinterpret_cast<std::uintptr_t>(
-                    gameModule) +
-                REFERENCE_BUILDER_2024_OFFSET;
-        }
-
-        std::uintptr_t ResolvePlayerOneDetectionObject()
-        {
-            constexpr std::array<std::uintptr_t, 3>
-                DETECTION_OBJECT_OFFSETS =
-            {
-                0x10,
-                0x4,
-                0x0
-            };
-
-            return
-                ResolveConfigured(
-                    TRUE_TUNING_2024_ROOT_OFFSET,
-                    TRUE_TUNING_2022_ROOT,
-                    DETECTION_OBJECT_OFFSETS);
-        }
-
-        bool WriteReferenceBuilderByte(
-            BYTE value)
-        {
-            if (!g_referenceBuilder)
-                return false;
-
-            DWORD oldProtect = 0;
-
-            if (!VirtualProtect(
-                    reinterpret_cast<void*>(
-                        g_referenceBuilder),
-                    1,
-                    PAGE_EXECUTE_READWRITE,
-                    &oldProtect))
-            {
-                return false;
-            }
-
-            *reinterpret_cast<volatile BYTE*>(
-                g_referenceBuilder) = value;
-
-            FlushInstructionCache(
-                GetCurrentProcess(),
-                reinterpret_cast<const void*>(
-                    g_referenceBuilder),
-                1);
-
-            DWORD unusedProtect = 0;
-            VirtualProtect(
-                reinterpret_cast<void*>(
-                    g_referenceBuilder),
-                1,
-                oldProtect,
-                &unusedProtect);
-
-            return true;
-        }
-
-        bool TryCaptureBuilderChartTargetAddress(
-            const CONTEXT* context,
-            std::uintptr_t& tuningAddressOut,
-            LONG& playerTagOut)
-        {
-#if defined(_M_IX86)
-            if (!context)
-                return false;
-
-            // The exhaustive multiplayer capture identified one specific
-            // builder-call shape that carries the chart tuning. Require that
-            // shape instead of accepting any nearby memory that merely looks
-            // like six sane integers.
-            constexpr std::uintptr_t PLAYER_TAG_STACK_OFFSET = 0x24;
-            constexpr std::uintptr_t STRING_COUNT_STACK_OFFSET = 0x30;
-            constexpr std::uintptr_t PLAYER_TAG_CONFIRM_STACK_OFFSET = 0x48;
-            constexpr std::uintptr_t DIRECT_TUNING_STACK_OFFSET = 0x88;
-
-            std::uintptr_t chartObject = 0;
-            std::uintptr_t directTuning = 0;
-            LONG playerTag = -1;
-            LONG confirmedPlayerTag = -1;
-            LONG stringCount = 0;
-
-            __try
-            {
-                chartObject =
-                    *reinterpret_cast<const std::uintptr_t*>(
-                        context->Esp +
-                        BUILDER_CHART_OBJECT_STACK_OFFSET);
-
-                playerTag =
-                    *reinterpret_cast<const LONG*>(
-                        context->Esp +
-                        PLAYER_TAG_STACK_OFFSET);
-
-                stringCount =
-                    *reinterpret_cast<const LONG*>(
-                        context->Esp +
-                        STRING_COUNT_STACK_OFFSET);
-
-                confirmedPlayerTag =
-                    *reinterpret_cast<const LONG*>(
-                        context->Esp +
-                        PLAYER_TAG_CONFIRM_STACK_OFFSET);
-
-                directTuning =
-                    *reinterpret_cast<const std::uintptr_t*>(
-                        context->Esp +
-                        DIRECT_TUNING_STACK_OFFSET);
-
-                if (chartObject == 0 ||
-                    stringCount != 6 ||
-                    playerTag != confirmedPlayerTag ||
-                    (playerTag != 0 && playerTag != 2) ||
-                    directTuning !=
-                        chartObject +
-                        BUILDER_CHART_TUNING_OFFSET)
-                {
-                    return false;
-                }
-            }
-            __except(EXCEPTION_EXECUTE_HANDLER)
-            {
-                return false;
-            }
-
-            // Do not read the six ints here. The exhaustive capture showed
-            // Rocksmith mutates this array after the reference-builder call.
-            // At the breakpoint P1 can still look like E Standard even when
-            // the settled tuner target is D Standard.
-            tuningAddressOut = directTuning;
-            playerTagOut = playerTag;
-            return true;
-#else
-            (void)context;
-            (void)tuningAddressOut;
-            (void)playerTagOut;
-            return false;
-#endif
-        }
-
-        void PublishTargetCapture(
-            const CONTEXT* context)
-        {
-#if defined(_M_IX86)
-            if (!context || context->Esi == 0)
-                return;
-
-            std::uintptr_t tuningAddress = 0;
-            LONG playerTag = -1;
-
-            if (!TryCaptureBuilderChartTargetAddress(
-                    context,
-                    tuningAddress,
-                    playerTag))
-            {
-                return;
-            }
-
-            const LONG sequence =
-                InterlockedIncrement(
-                    &g_targetCaptureCount);
-
-            TunerTargetCapture& capture =
-                g_targetCaptures[
-                    (sequence - 1) &
-                    (TARGET_CAPTURE_SLOTS - 1)];
-
-            capture.detection =
-                static_cast<std::uintptr_t>(
-                    context->Esi);
-            capture.tuningAddress = tuningAddress;
-            capture.playerTag = playerTag;
-            capture.threadId =
-                GetCurrentThreadId();
-            capture.tick =
-                GetTickCount64();
-
-            MemoryBarrier();
-            InterlockedExchange(
-                &capture.sequence,
-                sequence);
-#else
-            (void)context;
-#endif
-        }
-
-        LONG CALLBACK TunerTargetBuilderVeh(
-            PEXCEPTION_POINTERS exceptionInfo)
-        {
-#if defined(_M_IX86)
-            if (!exceptionInfo ||
-                !exceptionInfo->ExceptionRecord ||
-                !exceptionInfo->ContextRecord)
-            {
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            CONTEXT* context =
-                exceptionInfo->ContextRecord;
-
-            const DWORD code =
-                exceptionInfo->ExceptionRecord->ExceptionCode;
-
-            if (code == EXCEPTION_BREAKPOINT)
-            {
-                const std::uintptr_t exceptionAddress =
-                    reinterpret_cast<std::uintptr_t>(
-                        exceptionInfo->ExceptionRecord->ExceptionAddress);
-
-                if (exceptionAddress !=
-                    g_referenceBuilder)
-                {
-                    return EXCEPTION_CONTINUE_SEARCH;
-                }
-
-                PublishTargetCapture(context);
-
-                if (!WriteReferenceBuilderByte(
-                        g_referenceBuilderOriginalByte))
-                {
-                    return EXCEPTION_CONTINUE_SEARCH;
-                }
-
-                context->Eip =
-                    static_cast<DWORD>(
-                        g_referenceBuilder);
-                context->EFlags |= TRAP_FLAG;
-                g_targetSingleStepActive = 1;
-
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-
-            if (code == EXCEPTION_SINGLE_STEP &&
-                g_targetSingleStepActive != 0)
-            {
-                WriteReferenceBuilderByte(0xCC);
-
-                context->EFlags &= ~TRAP_FLAG;
-                g_targetSingleStepActive = 0;
-
-                return EXCEPTION_CONTINUE_EXECUTION;
-            }
-#else
-            (void)exceptionInfo;
-#endif
-
-            return EXCEPTION_CONTINUE_SEARCH;
-        }
-
-        bool InstallTunerTargetCapture()
-        {
-#if !defined(_M_IX86)
-            return false;
-#else
-            if (InterlockedCompareExchange(
-                    &g_targetHookInstalled,
-                    0,
-                    0) != 0)
-            {
-                return true;
-            }
-
-            const std::uintptr_t builder =
-                ResolveReferenceBuilder();
-
-            if (!builder ||
-                !IsReadableRange(
-                    reinterpret_cast<const void*>(
-                        builder),
-                    1))
-            {
-                return false;
-            }
-
-            BYTE original = 0;
-
-            if (!TryReadValue(
-                    builder,
-                    original) ||
-                original == 0xCC)
-            {
-                return false;
-            }
-
-            PVOID handler =
-                AddVectoredExceptionHandler(
-                    1,
-                    TunerTargetBuilderVeh);
-
-            if (!handler)
-                return false;
-
-            g_referenceBuilder = builder;
-            g_referenceBuilderOriginalByte = original;
-            g_targetVehHandle = handler;
-
-            if (!WriteReferenceBuilderByte(0xCC))
-            {
-                RemoveVectoredExceptionHandler(
-                    handler);
-                g_targetVehHandle = nullptr;
-                g_referenceBuilder = 0;
-                return false;
-            }
-
-            InterlockedExchange(
-                &g_targetHookInstalled,
-                1);
-
-            return true;
-#endif
-        }
-
-        bool CopyTargetCapture(
-            LONG sequence,
-            TunerTargetCapture& copy)
-        {
-            if (sequence <= 0)
-                return false;
-
-            const TunerTargetCapture& source =
-                g_targetCaptures[
-                    (sequence - 1) &
-                    (TARGET_CAPTURE_SLOTS - 1)];
-
-            const LONG publishedBefore =
-                InterlockedCompareExchange(
-                    const_cast<volatile LONG*>(
-                        &source.sequence),
-                    0,
-                    0);
-
-            if (publishedBefore != sequence)
-                return false;
-
-            copy.detection = source.detection;
-            copy.tuningAddress = source.tuningAddress;
-            copy.playerTag = source.playerTag;
-            copy.threadId = source.threadId;
-            copy.tick = source.tick;
-
-            MemoryBarrier();
-
-            const LONG publishedAfter =
-                InterlockedCompareExchange(
-                    const_cast<volatile LONG*>(
-                        &source.sequence),
-                    0,
-                    0);
-
-            return publishedAfter == sequence;
-        }
-
-        bool TryReadCapturedTuning(
-            const TunerTargetCapture& capture,
-            Tuning& tuning)
-        {
-            if (!capture.tuningAddress)
-                return false;
-
-            std::array<int, 6> strings{};
-
-            for (int i = 0; i < 6; ++i)
-            {
-                LONG value = 0;
-
-                if (!TryReadValue(
-                        capture.tuningAddress +
-                            (i * sizeof(LONG)),
-                        value) ||
-                    value < -24 ||
-                    value > 24)
-                {
-                    return false;
-                }
-
-                strings[i] =
-                    static_cast<int>(value);
-            }
-
-            tuning.strings = strings;
-            return true;
-        }
-
-        bool TryReadCapturedTargetPair(
-            Tuning& playerOne,
-            Tuning& playerTwo)
-        {
-            const LONG lastSequence =
-                InterlockedCompareExchange(
-                    &g_targetCaptureCount,
-                    0,
-                    0);
-
-            if (lastSequence <= 0)
-                return false;
-
-            TunerTargetCapture p1{};
-            TunerTargetCapture p2{};
-            bool haveP1 = false;
-            bool haveP2 = false;
-
-            const LONG firstSequence =
-                lastSequence >= TARGET_CAPTURE_SLOTS
-                ? lastSequence - TARGET_CAPTURE_SLOTS + 1
-                : 1;
-
-            for (LONG sequence = lastSequence;
-                 sequence >= firstSequence;
-                 --sequence)
-            {
-                TunerTargetCapture candidate{};
-
-                if (!CopyTargetCapture(
-                        sequence,
-                        candidate))
-                {
-                    continue;
-                }
-
-                // The arrangement-bearing builder call itself identifies the
-                // player: the validated call shape carries tag 0 for Player 1
-                // and tag 2 for Player 2. Do not add a second dependency on
-                // the separately resolved true-tuning pointer; that pointer can
-                // legitimately move while the captured target remains valid.
-                if (candidate.playerTag == 0)
-                {
-                    if (!haveP1)
-                    {
-                        p1 = candidate;
-                        haveP1 = true;
-                    }
-                }
-                else if (candidate.playerTag == 2 &&
-                    !haveP2)
-                {
-                    p2 = candidate;
-                    haveP2 = true;
-                }
-
-                if (haveP1 && haveP2)
-                    break;
-            }
-
-            if (!haveP1 || !haveP2)
-                return false;
-
-            const ULONGLONG separation =
-                p1.tick > p2.tick
-                ? p1.tick - p2.tick
-                : p2.tick - p1.tick;
-
-            if (separation >
-                    TARGET_PAIR_MAX_SEPARATION_MS ||
-                p1.threadId != p2.threadId)
-            {
-                return false;
-            }
-
-            // Dereference the captured addresses now, after Rocksmith has had
-            // time to populate the per-player chart targets. This function is
-            // called from the normal worker-thread Auto poll, not from VEH.
-            return
-                TryReadCapturedTuning(
-                    p1,
-                    playerOne) &&
-                TryReadCapturedTuning(
-                    p2,
-                    playerTwo);
-        }
+        // Multiplayer target acquisition is intentionally absent from this
+        // diagnostic build. F10 performs only a one-shot, read-only UI scan.
 
         const char* NoteNameFromOffset(
             int semitonesFromE)
@@ -1698,70 +1168,25 @@ namespace RocksmithTuning
 
     bool InitializeTunerTargetCapture()
     {
-        return InstallTunerTargetCapture();
+        // Deliberately no hook in this diagnostic build.
+        return true;
     }
 
     void ShutdownTunerTargetCapture()
     {
-#if defined(_M_IX86)
-        if (InterlockedCompareExchange(
-                &g_targetHookInstalled,
-                0,
-                0) == 0)
-        {
-            return;
-        }
-
-        WriteReferenceBuilderByte(
-            g_referenceBuilderOriginalByte);
-
-        if (g_targetVehHandle)
-        {
-            RemoveVectoredExceptionHandler(
-                g_targetVehHandle);
-        }
-
-        g_targetVehHandle = nullptr;
-        g_referenceBuilder = 0;
-        g_targetSingleStepActive = 0;
-
-        InterlockedExchange(
-            &g_targetHookInstalled,
-            0);
-#endif
+        // Nothing installed.
     }
 
     bool TryReadTunerTarget(
         int player,
         Tuning& tuning)
     {
-        if (player < 0 || player > 1)
+        // Preserve only the original P1-style tuner text reader while we map
+        // the multiplayer UI text path. P2 intentionally returns unavailable.
+        if (player != 0)
             return false;
 
-        // Preserve the proven single-player P1 source exactly. Multiplayer
-        // blanks/repoints that text, so only then do we need the builder pair.
-        if (player == 0 &&
-            TryReadTunerTextTuning(tuning))
-        {
-            return true;
-        }
-
-        Tuning playerOne{};
-        Tuning playerTwo{};
-
-        if (!TryReadCapturedTargetPair(
-                playerOne,
-                playerTwo))
-        {
-            return false;
-        }
-
-        tuning =
-            player == 0
-            ? playerOne
-            : playerTwo;
-
-        return true;
+        return TryReadTunerTextTuning(tuning);
     }
 
     bool TryReadTunerTarget(
@@ -1774,13 +1199,34 @@ namespace RocksmithTuning
 
     bool CaptureDebugSnapshot()
     {
+        // One-shot, read-only diagnostic for the multiplayer tuner UI.
+        //
+        // This intentionally does not use the reference-builder hook. It starts
+        // at the same root used by the proven single-player tuner-text reader,
+        // then walks nearby heap objects and records printable text plus the
+        // pointer path that reached it. Any text that our existing tuning-name
+        // parser recognizes is marked prominently in the log.
+        constexpr int MAX_DEPTH = 5;
+        constexpr size_t MAX_NODES = 768;
+        constexpr size_t OBJECT_SCAN_BYTES = 0x300;
+        constexpr size_t MAX_TEXT_LENGTH = 128;
+        constexpr size_t MAX_TEXT_HITS = 2500;
+
+        struct UiNode
+        {
+            std::uintptr_t address = 0;
+            int depth = 0;
+            std::string path;
+        };
+
         SYSTEMTIME now{};
         GetLocalTime(&now);
 
         std::ostringstream log;
 
         log << "============================================================\n";
-        log << "RL-Mods multiplayer Auto target capture test\n";
+        log << "RL-Mods multiplayer tuner UI text diagnostic\n";
+        log << "BUILD: MP_UI_TEXT_V1_READ_ONLY\n";
         log << std::setfill('0')
             << std::dec
             << now.wYear << '-'
@@ -1790,94 +1236,566 @@ namespace RocksmithTuning
             << std::setw(2) << now.wMinute << ':'
             << std::setw(2) << now.wSecond
             << "\n";
-        log << "Build: P2_AUTO_TARGET_TEST_FIX3_DEFERRED_READ\n";
         log << "Current menu: "
             << CurrentMenuName()
             << "\n";
-        log << "Target hook: "
-            << (InterlockedCompareExchange(
-                    &g_targetHookInstalled,
-                    0,
-                    0) != 0
-                ? "installed"
-                : "NOT INSTALLED")
-            << "\n";
-        log << "Captured valid target calls: "
-            << InterlockedCompareExchange(
-                    &g_targetCaptureCount,
-                    0,
-                    0)
-            << "\n";
+        log << "Builder hook: DISABLED\n";
 
-        const LONG lastSequence =
-            InterlockedCompareExchange(
-                &g_targetCaptureCount,
-                0,
-                0);
+        HMODULE gameModule =
+            GetModuleHandleW(nullptr);
 
-        const LONG firstSequence =
-            lastSequence >= TARGET_CAPTURE_SLOTS
-            ? lastSequence - TARGET_CAPTURE_SLOTS + 1
-            : 1;
-
-        for (LONG sequence = firstSequence;
-             sequence <= lastSequence;
-             ++sequence)
+        if (!gameModule)
         {
-            TunerTargetCapture capture{};
-
-            if (!CopyTargetCapture(sequence, capture))
-                continue;
-
-            Tuning captured{};
-            const bool targetReadable =
-                TryReadCapturedTuning(
-                    capture,
-                    captured);
-
-            log << "  capture " << sequence
-                << ": tag=" << capture.playerTag
-                << " detection=0x"
-                << std::hex << std::uppercase
-                << capture.detection
-                << " tuning=0x"
-                << capture.tuningAddress
-                << std::dec
-                << " thread=" << capture.threadId
-                << " tick=" << capture.tick;
-
-            if (targetReadable)
-            {
-                log << " target=" << VectorText(captured)
-                    << " / " << Name(captured);
-            }
-            else
-            {
-                log << " target=<unreadable>";
-            }
-
-            log << "\n";
-        }
-
-        Tuning p1{};
-        Tuning p2{};
-
-        if (TryReadCapturedTargetPair(p1, p2))
-        {
-            log << "P1 captured target: "
-                << VectorText(p1)
-                << " / "
-                << Name(p1)
-                << "\n";
-            log << "P2 captured target: "
-                << VectorText(p2)
-                << " / "
-                << Name(p2)
-                << "\n";
+            log << "Game module: unavailable\n";
         }
         else
         {
-            log << "Captured P1/P2 target pair: unavailable\n";
+            const std::uintptr_t base =
+                reinterpret_cast<std::uintptr_t>(
+                    gameModule);
+
+            const std::uintptr_t rootOffset =
+                GetExecutableVersion() ==
+                    ExecutableVersion::LearnAndPlay2024
+                ? TUNER_TEXT_2024_ROOT_OFFSET
+                : TUNER_TEXT_2022_ROOT;
+
+            const std::uintptr_t rootSlot =
+                base + rootOffset;
+
+            std::uintptr_t rootObject = 0;
+
+            log << "Tuner root slot: "
+                << AddressText(rootSlot)
+                << "\n";
+
+            if (!TryReadValue(
+                    rootSlot,
+                    rootObject) ||
+                !rootObject)
+            {
+                log << "Tuner root object: unavailable\n";
+            }
+            else
+            {
+                log << "Tuner root object: "
+                    << AddressText(rootObject)
+                    << "\n";
+
+                // Show the existing single-player text chain explicitly first.
+                std::uintptr_t knownChild = 0;
+                std::uintptr_t knownText = 0;
+
+                if (TryReadValue(
+                        rootObject + 0x28,
+                        knownChild) &&
+                    knownChild)
+                {
+                    log << "Known SP child *(root+0x28): "
+                        << AddressText(knownChild)
+                        << "\n";
+
+                    if (TryReadValue(
+                            knownChild + 0x44,
+                            knownText) &&
+                        knownText)
+                    {
+                        const std::string known =
+                            ReadString(
+                                knownText,
+                                MAX_TEXT_LENGTH);
+
+                        log << "Known SP text *(child+0x44): "
+                            << AddressText(knownText)
+                            << " -> \""
+                            << known
+                            << "\"\n";
+                    }
+                    else
+                    {
+                        log << "Known SP text *(child+0x44): null/unreadable\n";
+                    }
+                }
+                else
+                {
+                    log << "Known SP child *(root+0x28): null/unreadable\n";
+                }
+
+                auto queryReadable =
+                    [](std::uintptr_t address,
+                       MEMORY_BASIC_INFORMATION& mbi) -> bool
+                    {
+                        if (address < 0x10000)
+                            return false;
+
+                        if (!VirtualQuery(
+                                reinterpret_cast<const void*>(
+                                    address),
+                                &mbi,
+                                sizeof(mbi)))
+                        {
+                            return false;
+                        }
+
+                        if (mbi.State != MEM_COMMIT ||
+                            (mbi.Protect & PAGE_GUARD) ||
+                            (mbi.Protect & PAGE_NOACCESS))
+                        {
+                            return false;
+                        }
+
+                        const DWORD readable =
+                            PAGE_READONLY |
+                            PAGE_READWRITE |
+                            PAGE_WRITECOPY |
+                            PAGE_EXECUTE_READ |
+                            PAGE_EXECUTE_READWRITE |
+                            PAGE_EXECUTE_WRITECOPY;
+
+                        return (mbi.Protect & readable) != 0;
+                    };
+
+                auto readAscii =
+                    [&queryReadable](std::uintptr_t address,
+                                     size_t maxLength) -> std::string
+                    {
+                        MEMORY_BASIC_INFORMATION mbi{};
+
+                        if (!queryReadable(address, mbi))
+                            return {};
+
+                        const std::uintptr_t regionEnd =
+                            reinterpret_cast<std::uintptr_t>(
+                                mbi.BaseAddress) +
+                            static_cast<std::uintptr_t>(
+                                mbi.RegionSize);
+
+                        const size_t available =
+                            static_cast<size_t>(
+                                regionEnd - address);
+
+                        const size_t limit =
+                            available < maxLength
+                            ? available
+                            : maxLength;
+
+                        const auto* bytes =
+                            reinterpret_cast<const unsigned char*>(
+                                address);
+
+                        std::string text;
+                        text.reserve(limit);
+
+                        for (size_t i = 0;
+                             i < limit;
+                             ++i)
+                        {
+                            const unsigned char c = bytes[i];
+
+                            if (c == 0)
+                                break;
+
+                            if (c < 32 || c > 126)
+                                return {};
+
+                            text.push_back(
+                                static_cast<char>(c));
+                        }
+
+                        return text;
+                    };
+
+                auto readUtf16Ascii =
+                    [&queryReadable](std::uintptr_t address,
+                                     size_t maxLength) -> std::string
+                    {
+                        MEMORY_BASIC_INFORMATION mbi{};
+
+                        if (!queryReadable(address, mbi))
+                            return {};
+
+                        const std::uintptr_t regionEnd =
+                            reinterpret_cast<std::uintptr_t>(
+                                mbi.BaseAddress) +
+                            static_cast<std::uintptr_t>(
+                                mbi.RegionSize);
+
+                        const size_t availableBytes =
+                            static_cast<size_t>(
+                                regionEnd - address);
+
+                        const size_t availableChars =
+                            availableBytes /
+                            sizeof(std::uint16_t);
+
+                        const size_t limit =
+                            availableChars < maxLength
+                            ? availableChars
+                            : maxLength;
+
+                        const auto* chars =
+                            reinterpret_cast<const std::uint16_t*>(
+                                address);
+
+                        std::string text;
+                        text.reserve(limit);
+
+                        for (size_t i = 0;
+                             i < limit;
+                             ++i)
+                        {
+                            const std::uint16_t c = chars[i];
+
+                            if (c == 0)
+                                break;
+
+                            if (c < 32 || c > 126)
+                                return {};
+
+                            text.push_back(
+                                static_cast<char>(c));
+                        }
+
+                        return text;
+                    };
+
+                auto isHeapPointer =
+                    [](std::uintptr_t address) -> bool
+                    {
+                        if (address < 0x10000 ||
+                            (address & 0x3) != 0)
+                        {
+                            return false;
+                        }
+
+                        MEMORY_BASIC_INFORMATION mbi{};
+
+                        if (!VirtualQuery(
+                                reinterpret_cast<const void*>(
+                                    address),
+                                &mbi,
+                                sizeof(mbi)))
+                        {
+                            return false;
+                        }
+
+                        if (mbi.State != MEM_COMMIT ||
+                            (mbi.Protect & PAGE_GUARD) ||
+                            (mbi.Protect & PAGE_NOACCESS))
+                        {
+                            return false;
+                        }
+
+                        const DWORD executable =
+                            PAGE_EXECUTE |
+                            PAGE_EXECUTE_READ |
+                            PAGE_EXECUTE_READWRITE |
+                            PAGE_EXECUTE_WRITECOPY;
+
+                        if (mbi.Protect & executable)
+                            return false;
+
+                        // The tuner UI objects we care about are heap/private
+                        // objects. Avoid wandering through the executable image,
+                        // vtables and mapped file data.
+                        return mbi.Type == MEM_PRIVATE;
+                    };
+
+                auto logText =
+                    [&log](const char* kind,
+                           const std::string& path,
+                           std::uintptr_t address,
+                           const std::string& text,
+                           size_t& textHits)
+                    {
+                        if (text.size() < 4)
+                            return;
+
+                        ++textHits;
+
+                        Tuning parsed{};
+                        const bool tuningText =
+                            TryLookupTuningText(
+                                text,
+                                parsed);
+
+                        if (tuningText)
+                        {
+                            log << "*** TUNING-TEXT ";
+                        }
+
+                        log << kind
+                            << ' '
+                            << path
+                            << " @ "
+                            << AddressText(address)
+                            << " = \""
+                            << text
+                            << "\"";
+
+                        if (tuningText)
+                        {
+                            log << " -> "
+                                << VectorText(parsed)
+                                << " / "
+                                << Name(parsed);
+                        }
+
+                        log << "\n";
+                    };
+
+                std::deque<UiNode> queue;
+                std::unordered_set<std::uintptr_t> visited;
+
+                // Seed the root and the known SP child first so the familiar
+                // branch is examined before the broader graph consumes nodes.
+                queue.push_back(
+                    { rootObject, 0, "ROOT" });
+
+                if (knownChild &&
+                    knownChild != rootObject)
+                {
+                    queue.push_back(
+                        { knownChild, 1, "ROOT/+0x28" });
+                }
+
+                size_t nodesScanned = 0;
+                size_t textHits = 0;
+
+                log << "\nUI OBJECT GRAPH TEXT WALK\n";
+                log << "  maxDepth=" << MAX_DEPTH
+                    << " maxNodes=" << MAX_NODES
+                    << " scanBytesPerObject=0x"
+                    << std::hex << std::uppercase
+                    << OBJECT_SCAN_BYTES
+                    << std::dec
+                    << "\n";
+
+                while (!queue.empty() &&
+                       nodesScanned < MAX_NODES &&
+                       textHits < MAX_TEXT_HITS)
+                {
+                    UiNode node =
+                        std::move(queue.front());
+                    queue.pop_front();
+
+                    if (!node.address ||
+                        visited.find(node.address) !=
+                            visited.end())
+                    {
+                        continue;
+                    }
+
+                    visited.insert(node.address);
+                    ++nodesScanned;
+
+                    if (!IsReadableRange(
+                            reinterpret_cast<const void*>(
+                                node.address),
+                            OBJECT_SCAN_BYTES))
+                    {
+                        continue;
+                    }
+
+                    std::array<
+                        std::uint8_t,
+                        OBJECT_SCAN_BYTES> bytes{};
+
+                    std::memcpy(
+                        bytes.data(),
+                        reinterpret_cast<const void*>(
+                            node.address),
+                        bytes.size());
+
+                    log << "\nNODE "
+                        << nodesScanned
+                        << " depth="
+                        << node.depth
+                        << " path="
+                        << node.path
+                        << " address="
+                        << AddressText(node.address)
+                        << "\n";
+
+                    // Inline ASCII strings inside the object itself.
+                    for (size_t i = 0;
+                         i < bytes.size() &&
+                         textHits < MAX_TEXT_HITS;)
+                    {
+                        if (bytes[i] < 32 ||
+                            bytes[i] > 126)
+                        {
+                            ++i;
+                            continue;
+                        }
+
+                        const size_t start = i;
+                        std::string text;
+
+                        while (i < bytes.size() &&
+                               bytes[i] >= 32 &&
+                               bytes[i] <= 126 &&
+                               text.size() < MAX_TEXT_LENGTH)
+                        {
+                            text.push_back(
+                                static_cast<char>(bytes[i]));
+                            ++i;
+                        }
+
+                        if (text.size() >= 4)
+                        {
+                            std::ostringstream pathText;
+                            pathText << node.path
+                                     << "/inline+0x"
+                                     << std::hex
+                                     << std::uppercase
+                                     << start;
+
+                            logText(
+                                "INLINE-ASCII",
+                                pathText.str(),
+                                node.address + start,
+                                text,
+                                textHits);
+                        }
+                    }
+
+                    // Inline UTF-16 strings containing ordinary ASCII glyphs.
+                    for (size_t i = 0;
+                         i + 7 < bytes.size() &&
+                         textHits < MAX_TEXT_HITS;
+                         ++i)
+                    {
+                        if (bytes[i] < 32 ||
+                            bytes[i] > 126 ||
+                            bytes[i + 1] != 0)
+                        {
+                            continue;
+                        }
+
+                        const size_t start = i;
+                        std::string text;
+                        size_t cursor = i;
+
+                        while (cursor + 1 < bytes.size() &&
+                               bytes[cursor] >= 32 &&
+                               bytes[cursor] <= 126 &&
+                               bytes[cursor + 1] == 0 &&
+                               text.size() < MAX_TEXT_LENGTH)
+                        {
+                            text.push_back(
+                                static_cast<char>(
+                                    bytes[cursor]));
+                            cursor += 2;
+                        }
+
+                        if (text.size() >= 4)
+                        {
+                            std::ostringstream pathText;
+                            pathText << node.path
+                                     << "/inline16+0x"
+                                     << std::hex
+                                     << std::uppercase
+                                     << start;
+
+                            logText(
+                                "INLINE-UTF16",
+                                pathText.str(),
+                                node.address + start,
+                                text,
+                                textHits);
+
+                            i = cursor - 1;
+                        }
+                    }
+
+                    // Every 32-bit field is treated as a possible pointer. For
+                    // each readable target, first test whether it is text. If it
+                    // is not text and still looks like heap/object memory, queue
+                    // it for another level of the graph walk.
+                    for (size_t offset = 0;
+                         offset + sizeof(std::uintptr_t) <=
+                             bytes.size() &&
+                         textHits < MAX_TEXT_HITS;
+                         offset += sizeof(std::uintptr_t))
+                    {
+                        std::uintptr_t pointer = 0;
+
+                        std::memcpy(
+                            &pointer,
+                            bytes.data() + offset,
+                            sizeof(pointer));
+
+                        if (!pointer)
+                            continue;
+
+                        const std::string ascii =
+                            readAscii(
+                                pointer,
+                                MAX_TEXT_LENGTH);
+
+                        const std::string utf16 =
+                            ascii.empty()
+                            ? readUtf16Ascii(
+                                pointer,
+                                MAX_TEXT_LENGTH)
+                            : std::string{};
+
+                        std::ostringstream fieldPath;
+                        fieldPath << node.path
+                                  << "/+0x"
+                                  << std::hex
+                                  << std::uppercase
+                                  << offset;
+
+                        if (ascii.size() >= 4)
+                        {
+                            logText(
+                                "PTR-ASCII",
+                                fieldPath.str(),
+                                pointer,
+                                ascii,
+                                textHits);
+                            continue;
+                        }
+
+                        if (utf16.size() >= 4)
+                        {
+                            logText(
+                                "PTR-UTF16",
+                                fieldPath.str(),
+                                pointer,
+                                utf16,
+                                textHits);
+                            continue;
+                        }
+
+                        if (node.depth < MAX_DEPTH &&
+                            isHeapPointer(pointer) &&
+                            visited.find(pointer) ==
+                                visited.end())
+                        {
+                            queue.push_back(
+                                {
+                                    pointer,
+                                    node.depth + 1,
+                                    fieldPath.str()
+                                });
+                        }
+                    }
+                }
+
+                log << "\nSUMMARY\n";
+                log << "  nodes scanned: "
+                    << nodesScanned
+                    << "\n";
+                log << "  printable text hits: "
+                    << textHits
+                    << "\n";
+                log << "  queued nodes remaining at cap: "
+                    << queue.size()
+                    << "\n";
+            }
         }
 
         log << "============================================================\n\n";
