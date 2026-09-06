@@ -13,8 +13,10 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace RocksmithTuning
 {
@@ -1199,25 +1201,211 @@ namespace RocksmithTuning
 
     bool CaptureDebugSnapshot()
     {
-        // One-shot, read-only diagnostic for the multiplayer tuner UI.
+        // One-shot, read-only multiplayer tuner text locator.
         //
-        // This intentionally does not use the reference-builder hook. It starts
-        // at the same root used by the proven single-player tuner-text reader,
-        // then walks nearby heap objects and records printable text plus the
-        // pointer path that reached it. Any text that our existing tuning-name
-        // parser recognizes is marked prominently in the log.
-        constexpr int MAX_DEPTH = 5;
-        constexpr size_t MAX_NODES = 768;
-        constexpr size_t OBJECT_SCAN_BYTES = 0x300;
-        constexpr size_t MAX_TEXT_LENGTH = 128;
-        constexpr size_t MAX_TEXT_HITS = 2500;
+        // Do not walk arbitrary UI pointers: the tuner root reaches large
+        // portions of Rocksmith's object graph and quickly explodes into
+        // unrelated engine data. Instead, locate every live tuning-looking
+        // string in private process memory, then work backward from the string
+        // addresses to the objects that reference them.
+        //
+        // The proven single-player UI layout stores its displayed tuning text
+        // pointer at tunerObject + 0x44. For every process-wide tuning-string
+        // reference, test that same layout and then locate references to the
+        // candidate tuner object itself. This gives us a direct way to find a
+        // multiplayer sibling without any code hook.
+        constexpr size_t MAX_STRING_LENGTH = 64;
+        constexpr size_t MAX_TUNING_HITS = 256;
+        constexpr size_t MAX_STRING_REFERENCES = 2048;
+        constexpr size_t MAX_OBJECT_REFERENCES = 2048;
+        constexpr std::uintptr_t UI_TEXT_FIELD_OFFSET = 0x44;
+        constexpr size_t UI_OBJECT_INSPECT_BYTES = 0xA0;
+        constexpr size_t ROOT_INSPECT_BYTES = 0x300;
 
-        struct UiNode
+        struct MemoryRegion
+        {
+            std::uintptr_t base = 0;
+            size_t size = 0;
+            DWORD protect = 0;
+            DWORD type = 0;
+        };
+
+        struct TuningHit
         {
             std::uintptr_t address = 0;
-            int depth = 0;
-            std::string path;
+            bool utf16 = false;
+            std::string text;
+            Tuning tuning{};
         };
+
+        struct PointerReference
+        {
+            std::uintptr_t location = 0;
+            std::uintptr_t target = 0;
+        };
+
+        struct UiCandidate
+        {
+            std::uintptr_t base = 0;
+            std::uintptr_t textAddress = 0;
+        };
+
+        auto regionReadable =
+            [](const MEMORY_BASIC_INFORMATION& mbi) -> bool
+            {
+                if (mbi.State != MEM_COMMIT ||
+                    (mbi.Protect & PAGE_GUARD) ||
+                    (mbi.Protect & PAGE_NOACCESS))
+                {
+                    return false;
+                }
+
+                const DWORD readable =
+                    PAGE_READONLY |
+                    PAGE_READWRITE |
+                    PAGE_WRITECOPY |
+                    PAGE_EXECUTE_READ |
+                    PAGE_EXECUTE_READWRITE |
+                    PAGE_EXECUTE_WRITECOPY;
+
+                return (mbi.Protect & readable) != 0;
+            };
+
+        auto regionExecutable =
+            [](DWORD protect) -> bool
+            {
+                const DWORD executable =
+                    PAGE_EXECUTE |
+                    PAGE_EXECUTE_READ |
+                    PAGE_EXECUTE_READWRITE |
+                    PAGE_EXECUTE_WRITECOPY;
+
+                return (protect & executable) != 0;
+            };
+
+        auto memoryTypeName =
+            [](DWORD type) -> const char*
+            {
+                switch (type)
+                {
+                case MEM_PRIVATE:
+                    return "PRIVATE";
+                case MEM_MAPPED:
+                    return "MAPPED";
+                case MEM_IMAGE:
+                    return "IMAGE";
+                default:
+                    return "OTHER";
+                }
+            };
+
+        auto collectPrivateRegions =
+            [&regionReadable,
+             &regionExecutable]()
+                -> std::vector<MemoryRegion>
+            {
+                std::vector<MemoryRegion> regions;
+
+                SYSTEM_INFO systemInfo{};
+                GetSystemInfo(&systemInfo);
+
+                std::uintptr_t cursor =
+                    reinterpret_cast<std::uintptr_t>(
+                        systemInfo.lpMinimumApplicationAddress);
+
+                const std::uintptr_t maximum =
+                    reinterpret_cast<std::uintptr_t>(
+                        systemInfo.lpMaximumApplicationAddress);
+
+                while (cursor < maximum)
+                {
+                    MEMORY_BASIC_INFORMATION mbi{};
+
+                    if (!VirtualQuery(
+                            reinterpret_cast<const void*>(
+                                cursor),
+                            &mbi,
+                            sizeof(mbi)))
+                    {
+                        break;
+                    }
+
+                    const std::uintptr_t regionBase =
+                        reinterpret_cast<std::uintptr_t>(
+                            mbi.BaseAddress);
+
+                    const std::uintptr_t regionSize =
+                        static_cast<std::uintptr_t>(
+                            mbi.RegionSize);
+
+                    std::uintptr_t next = regionBase + regionSize;
+
+                    if (next <= cursor)
+                        break;
+
+                    if (mbi.Type == MEM_PRIVATE &&
+                        regionReadable(mbi) &&
+                        !regionExecutable(mbi.Protect))
+                    {
+                        regions.push_back(
+                            {
+                                regionBase,
+                                static_cast<size_t>(
+                                    regionSize),
+                                mbi.Protect,
+                                mbi.Type
+                            });
+                    }
+
+                    cursor = next;
+                }
+
+                return regions;
+            };
+
+        auto readPointerText =
+            [](std::uintptr_t pointer) -> std::string
+            {
+                if (!pointer)
+                    return {};
+
+                return ReadString(
+                    pointer,
+                    128);
+            };
+
+        auto logUiField =
+            [&readPointerText](
+                std::ostringstream& log,
+                std::uintptr_t base,
+                std::uintptr_t offset,
+                const char* label)
+            {
+                std::uintptr_t pointer = 0;
+
+                log << "    " << label
+                    << " +"
+                    << AddressText(offset)
+                    << ": ";
+
+                if (!TryReadValue(
+                        base + offset,
+                        pointer))
+                {
+                    log << "<unreadable>\n";
+                    return;
+                }
+
+                log << AddressText(pointer);
+
+                const std::string text =
+                    readPointerText(pointer);
+
+                if (!text.empty())
+                    log << " -> \"" << text << "\"";
+
+                log << "\n";
+            };
 
         SYSTEMTIME now{};
         GetLocalTime(&now);
@@ -1225,8 +1413,8 @@ namespace RocksmithTuning
         std::ostringstream log;
 
         log << "============================================================\n";
-        log << "RL-Mods multiplayer tuner UI text diagnostic\n";
-        log << "BUILD: MP_UI_TEXT_V1_READ_ONLY\n";
+        log << "RL-Mods multiplayer tuner process text locator\n";
+        log << "BUILD: MP_UI_TEXT_V2_PROCESS_LOCATOR\n";
         log << std::setfill('0')
             << std::dec
             << now.wYear << '-'
@@ -1244,11 +1432,12 @@ namespace RocksmithTuning
         HMODULE gameModule =
             GetModuleHandleW(nullptr);
 
-        if (!gameModule)
-        {
-            log << "Game module: unavailable\n";
-        }
-        else
+        std::uintptr_t rootSlot = 0;
+        std::uintptr_t rootObject = 0;
+        std::uintptr_t knownChild = 0;
+        std::uintptr_t knownText = 0;
+
+        if (gameModule)
         {
             const std::uintptr_t base =
                 reinterpret_cast<std::uintptr_t>(
@@ -1260,544 +1449,601 @@ namespace RocksmithTuning
                 ? TUNER_TEXT_2024_ROOT_OFFSET
                 : TUNER_TEXT_2022_ROOT;
 
-            const std::uintptr_t rootSlot =
-                base + rootOffset;
+            rootSlot = base + rootOffset;
 
-            std::uintptr_t rootObject = 0;
+            TryReadValue(
+                rootSlot,
+                rootObject);
 
-            log << "Tuner root slot: "
-                << AddressText(rootSlot)
-                << "\n";
-
-            if (!TryReadValue(
-                    rootSlot,
-                    rootObject) ||
-                !rootObject)
+            if (rootObject)
             {
-                log << "Tuner root object: unavailable\n";
-            }
-            else
-            {
-                log << "Tuner root object: "
-                    << AddressText(rootObject)
-                    << "\n";
+                TryReadValue(
+                    rootObject + 0x28,
+                    knownChild);
 
-                // Show the existing single-player text chain explicitly first.
-                std::uintptr_t knownChild = 0;
-                std::uintptr_t knownText = 0;
-
-                if (TryReadValue(
-                        rootObject + 0x28,
-                        knownChild) &&
-                    knownChild)
+                if (knownChild)
                 {
-                    log << "Known SP child *(root+0x28): "
-                        << AddressText(knownChild)
-                        << "\n";
-
-                    if (TryReadValue(
-                            knownChild + 0x44,
-                            knownText) &&
-                        knownText)
-                    {
-                        const std::string known =
-                            ReadString(
-                                knownText,
-                                MAX_TEXT_LENGTH);
-
-                        log << "Known SP text *(child+0x44): "
-                            << AddressText(knownText)
-                            << " -> \""
-                            << known
-                            << "\"\n";
-                    }
-                    else
-                    {
-                        log << "Known SP text *(child+0x44): null/unreadable\n";
-                    }
+                    TryReadValue(
+                        knownChild +
+                            UI_TEXT_FIELD_OFFSET,
+                        knownText);
                 }
-                else
-                {
-                    log << "Known SP child *(root+0x28): null/unreadable\n";
-                }
-
-                auto queryReadable =
-                    [](std::uintptr_t address,
-                       MEMORY_BASIC_INFORMATION& mbi) -> bool
-                    {
-                        if (address < 0x10000)
-                            return false;
-
-                        if (!VirtualQuery(
-                                reinterpret_cast<const void*>(
-                                    address),
-                                &mbi,
-                                sizeof(mbi)))
-                        {
-                            return false;
-                        }
-
-                        if (mbi.State != MEM_COMMIT ||
-                            (mbi.Protect & PAGE_GUARD) ||
-                            (mbi.Protect & PAGE_NOACCESS))
-                        {
-                            return false;
-                        }
-
-                        const DWORD readable =
-                            PAGE_READONLY |
-                            PAGE_READWRITE |
-                            PAGE_WRITECOPY |
-                            PAGE_EXECUTE_READ |
-                            PAGE_EXECUTE_READWRITE |
-                            PAGE_EXECUTE_WRITECOPY;
-
-                        return (mbi.Protect & readable) != 0;
-                    };
-
-                auto readAscii =
-                    [&queryReadable](std::uintptr_t address,
-                                     size_t maxLength) -> std::string
-                    {
-                        MEMORY_BASIC_INFORMATION mbi{};
-
-                        if (!queryReadable(address, mbi))
-                            return {};
-
-                        const std::uintptr_t regionEnd =
-                            reinterpret_cast<std::uintptr_t>(
-                                mbi.BaseAddress) +
-                            static_cast<std::uintptr_t>(
-                                mbi.RegionSize);
-
-                        const size_t available =
-                            static_cast<size_t>(
-                                regionEnd - address);
-
-                        const size_t limit =
-                            available < maxLength
-                            ? available
-                            : maxLength;
-
-                        const auto* bytes =
-                            reinterpret_cast<const unsigned char*>(
-                                address);
-
-                        std::string text;
-                        text.reserve(limit);
-
-                        for (size_t i = 0;
-                             i < limit;
-                             ++i)
-                        {
-                            const unsigned char c = bytes[i];
-
-                            if (c == 0)
-                                break;
-
-                            if (c < 32 || c > 126)
-                                return {};
-
-                            text.push_back(
-                                static_cast<char>(c));
-                        }
-
-                        return text;
-                    };
-
-                auto readUtf16Ascii =
-                    [&queryReadable](std::uintptr_t address,
-                                     size_t maxLength) -> std::string
-                    {
-                        MEMORY_BASIC_INFORMATION mbi{};
-
-                        if (!queryReadable(address, mbi))
-                            return {};
-
-                        const std::uintptr_t regionEnd =
-                            reinterpret_cast<std::uintptr_t>(
-                                mbi.BaseAddress) +
-                            static_cast<std::uintptr_t>(
-                                mbi.RegionSize);
-
-                        const size_t availableBytes =
-                            static_cast<size_t>(
-                                regionEnd - address);
-
-                        const size_t availableChars =
-                            availableBytes /
-                            sizeof(std::uint16_t);
-
-                        const size_t limit =
-                            availableChars < maxLength
-                            ? availableChars
-                            : maxLength;
-
-                        const auto* chars =
-                            reinterpret_cast<const std::uint16_t*>(
-                                address);
-
-                        std::string text;
-                        text.reserve(limit);
-
-                        for (size_t i = 0;
-                             i < limit;
-                             ++i)
-                        {
-                            const std::uint16_t c = chars[i];
-
-                            if (c == 0)
-                                break;
-
-                            if (c < 32 || c > 126)
-                                return {};
-
-                            text.push_back(
-                                static_cast<char>(c));
-                        }
-
-                        return text;
-                    };
-
-                auto isHeapPointer =
-                    [](std::uintptr_t address) -> bool
-                    {
-                        if (address < 0x10000 ||
-                            (address & 0x3) != 0)
-                        {
-                            return false;
-                        }
-
-                        MEMORY_BASIC_INFORMATION mbi{};
-
-                        if (!VirtualQuery(
-                                reinterpret_cast<const void*>(
-                                    address),
-                                &mbi,
-                                sizeof(mbi)))
-                        {
-                            return false;
-                        }
-
-                        if (mbi.State != MEM_COMMIT ||
-                            (mbi.Protect & PAGE_GUARD) ||
-                            (mbi.Protect & PAGE_NOACCESS))
-                        {
-                            return false;
-                        }
-
-                        const DWORD executable =
-                            PAGE_EXECUTE |
-                            PAGE_EXECUTE_READ |
-                            PAGE_EXECUTE_READWRITE |
-                            PAGE_EXECUTE_WRITECOPY;
-
-                        if (mbi.Protect & executable)
-                            return false;
-
-                        // The tuner UI objects we care about are heap/private
-                        // objects. Avoid wandering through the executable image,
-                        // vtables and mapped file data.
-                        return mbi.Type == MEM_PRIVATE;
-                    };
-
-                auto logText =
-                    [&log](const char* kind,
-                           const std::string& path,
-                           std::uintptr_t address,
-                           const std::string& text,
-                           size_t& textHits)
-                    {
-                        if (text.size() < 4)
-                            return;
-
-                        ++textHits;
-
-                        Tuning parsed{};
-                        const bool tuningText =
-                            TryLookupTuningText(
-                                text,
-                                parsed);
-
-                        if (tuningText)
-                        {
-                            log << "*** TUNING-TEXT ";
-                        }
-
-                        log << kind
-                            << ' '
-                            << path
-                            << " @ "
-                            << AddressText(address)
-                            << " = \""
-                            << text
-                            << "\"";
-
-                        if (tuningText)
-                        {
-                            log << " -> "
-                                << VectorText(parsed)
-                                << " / "
-                                << Name(parsed);
-                        }
-
-                        log << "\n";
-                    };
-
-                std::deque<UiNode> queue;
-                std::unordered_set<std::uintptr_t> visited;
-
-                // Seed the root and the known SP child first so the familiar
-                // branch is examined before the broader graph consumes nodes.
-                queue.push_back(
-                    { rootObject, 0, "ROOT" });
-
-                if (knownChild &&
-                    knownChild != rootObject)
-                {
-                    queue.push_back(
-                        { knownChild, 1, "ROOT/+0x28" });
-                }
-
-                size_t nodesScanned = 0;
-                size_t textHits = 0;
-
-                log << "\nUI OBJECT GRAPH TEXT WALK\n";
-                log << "  maxDepth=" << MAX_DEPTH
-                    << " maxNodes=" << MAX_NODES
-                    << " scanBytesPerObject=0x"
-                    << std::hex << std::uppercase
-                    << OBJECT_SCAN_BYTES
-                    << std::dec
-                    << "\n";
-
-                while (!queue.empty() &&
-                       nodesScanned < MAX_NODES &&
-                       textHits < MAX_TEXT_HITS)
-                {
-                    UiNode node =
-                        std::move(queue.front());
-                    queue.pop_front();
-
-                    if (!node.address ||
-                        visited.find(node.address) !=
-                            visited.end())
-                    {
-                        continue;
-                    }
-
-                    visited.insert(node.address);
-                    ++nodesScanned;
-
-                    if (!IsReadableRange(
-                            reinterpret_cast<const void*>(
-                                node.address),
-                            OBJECT_SCAN_BYTES))
-                    {
-                        continue;
-                    }
-
-                    std::array<
-                        std::uint8_t,
-                        OBJECT_SCAN_BYTES> bytes{};
-
-                    std::memcpy(
-                        bytes.data(),
-                        reinterpret_cast<const void*>(
-                            node.address),
-                        bytes.size());
-
-                    log << "\nNODE "
-                        << nodesScanned
-                        << " depth="
-                        << node.depth
-                        << " path="
-                        << node.path
-                        << " address="
-                        << AddressText(node.address)
-                        << "\n";
-
-                    // Inline ASCII strings inside the object itself.
-                    for (size_t i = 0;
-                         i < bytes.size() &&
-                         textHits < MAX_TEXT_HITS;)
-                    {
-                        if (bytes[i] < 32 ||
-                            bytes[i] > 126)
-                        {
-                            ++i;
-                            continue;
-                        }
-
-                        const size_t start = i;
-                        std::string text;
-
-                        while (i < bytes.size() &&
-                               bytes[i] >= 32 &&
-                               bytes[i] <= 126 &&
-                               text.size() < MAX_TEXT_LENGTH)
-                        {
-                            text.push_back(
-                                static_cast<char>(bytes[i]));
-                            ++i;
-                        }
-
-                        if (text.size() >= 4)
-                        {
-                            std::ostringstream pathText;
-                            pathText << node.path
-                                     << "/inline+0x"
-                                     << std::hex
-                                     << std::uppercase
-                                     << start;
-
-                            logText(
-                                "INLINE-ASCII",
-                                pathText.str(),
-                                node.address + start,
-                                text,
-                                textHits);
-                        }
-                    }
-
-                    // Inline UTF-16 strings containing ordinary ASCII glyphs.
-                    for (size_t i = 0;
-                         i + 7 < bytes.size() &&
-                         textHits < MAX_TEXT_HITS;
-                         ++i)
-                    {
-                        if (bytes[i] < 32 ||
-                            bytes[i] > 126 ||
-                            bytes[i + 1] != 0)
-                        {
-                            continue;
-                        }
-
-                        const size_t start = i;
-                        std::string text;
-                        size_t cursor = i;
-
-                        while (cursor + 1 < bytes.size() &&
-                               bytes[cursor] >= 32 &&
-                               bytes[cursor] <= 126 &&
-                               bytes[cursor + 1] == 0 &&
-                               text.size() < MAX_TEXT_LENGTH)
-                        {
-                            text.push_back(
-                                static_cast<char>(
-                                    bytes[cursor]));
-                            cursor += 2;
-                        }
-
-                        if (text.size() >= 4)
-                        {
-                            std::ostringstream pathText;
-                            pathText << node.path
-                                     << "/inline16+0x"
-                                     << std::hex
-                                     << std::uppercase
-                                     << start;
-
-                            logText(
-                                "INLINE-UTF16",
-                                pathText.str(),
-                                node.address + start,
-                                text,
-                                textHits);
-
-                            i = cursor - 1;
-                        }
-                    }
-
-                    // Every 32-bit field is treated as a possible pointer. For
-                    // each readable target, first test whether it is text. If it
-                    // is not text and still looks like heap/object memory, queue
-                    // it for another level of the graph walk.
-                    for (size_t offset = 0;
-                         offset + sizeof(std::uintptr_t) <=
-                             bytes.size() &&
-                         textHits < MAX_TEXT_HITS;
-                         offset += sizeof(std::uintptr_t))
-                    {
-                        std::uintptr_t pointer = 0;
-
-                        std::memcpy(
-                            &pointer,
-                            bytes.data() + offset,
-                            sizeof(pointer));
-
-                        if (!pointer)
-                            continue;
-
-                        const std::string ascii =
-                            readAscii(
-                                pointer,
-                                MAX_TEXT_LENGTH);
-
-                        const std::string utf16 =
-                            ascii.empty()
-                            ? readUtf16Ascii(
-                                pointer,
-                                MAX_TEXT_LENGTH)
-                            : std::string{};
-
-                        std::ostringstream fieldPath;
-                        fieldPath << node.path
-                                  << "/+0x"
-                                  << std::hex
-                                  << std::uppercase
-                                  << offset;
-
-                        if (ascii.size() >= 4)
-                        {
-                            logText(
-                                "PTR-ASCII",
-                                fieldPath.str(),
-                                pointer,
-                                ascii,
-                                textHits);
-                            continue;
-                        }
-
-                        if (utf16.size() >= 4)
-                        {
-                            logText(
-                                "PTR-UTF16",
-                                fieldPath.str(),
-                                pointer,
-                                utf16,
-                                textHits);
-                            continue;
-                        }
-
-                        if (node.depth < MAX_DEPTH &&
-                            isHeapPointer(pointer) &&
-                            visited.find(pointer) ==
-                                visited.end())
-                        {
-                            queue.push_back(
-                                {
-                                    pointer,
-                                    node.depth + 1,
-                                    fieldPath.str()
-                                });
-                        }
-                    }
-                }
-
-                log << "\nSUMMARY\n";
-                log << "  nodes scanned: "
-                    << nodesScanned
-                    << "\n";
-                log << "  printable text hits: "
-                    << textHits
-                    << "\n";
-                log << "  queued nodes remaining at cap: "
-                    << queue.size()
-                    << "\n";
             }
         }
 
+        log << "Tuner root slot: "
+            << AddressText(rootSlot)
+            << "\n";
+        log << "Tuner root object: "
+            << AddressText(rootObject)
+            << "\n";
+        log << "Known SP child *(root+0x28): "
+            << AddressText(knownChild)
+            << "\n";
+        log << "Known SP text *(child+0x44): "
+            << AddressText(knownText);
+
+        const std::string knownTextValue =
+            readPointerText(
+                knownText);
+
+        if (!knownTextValue.empty())
+            log << " -> \"" << knownTextValue << "\"";
+
+        log << "\n\n";
+
+        const std::vector<MemoryRegion> regions =
+            collectPrivateRegions();
+
+        size_t totalPrivateBytes = 0;
+
+        for (const auto& region : regions)
+            totalPrivateBytes += region.size;
+
+        log << "PRIVATE READABLE NON-EXEC MEMORY\n";
+        log << "  regions: " << regions.size() << "\n";
+        log << "  bytes: " << totalPrivateBytes << "\n\n";
+
+        std::vector<TuningHit> tuningHits;
+        std::unordered_set<std::uintptr_t> hitAddresses;
+
+        auto addHit =
+            [&tuningHits,
+             &hitAddresses](
+                std::uintptr_t address,
+                bool utf16,
+                const std::string& text)
+            {
+                if (tuningHits.size() >=
+                    MAX_TUNING_HITS)
+                {
+                    return;
+                }
+
+                if (hitAddresses.find(address) !=
+                    hitAddresses.end())
+                {
+                    return;
+                }
+
+                Tuning parsed{};
+
+                if (!TryLookupTuningText(
+                        text,
+                        parsed))
+                {
+                    return;
+                }
+
+                hitAddresses.insert(address);
+                tuningHits.push_back(
+                    {
+                        address,
+                        utf16,
+                        text,
+                        parsed
+                    });
+            };
+
+        // Pass 1: locate live private-memory strings that our existing tuning
+        // parser recognizes. This searches what Rocksmith actually has in
+        // memory right now rather than guessing which UI branch owns it.
+        for (const auto& region : regions)
+        {
+            if (tuningHits.size() >=
+                MAX_TUNING_HITS)
+            {
+                break;
+            }
+
+            if (region.size == 0)
+                continue;
+
+            const auto* bytes =
+                reinterpret_cast<const std::uint8_t*>(
+                    region.base);
+
+            // ASCII, null-terminated.
+            for (size_t i = 0;
+                 i < region.size &&
+                 tuningHits.size() <
+                     MAX_TUNING_HITS;)
+            {
+                const std::uint8_t first = bytes[i];
+
+                if (first < 32 || first > 126)
+                {
+                    ++i;
+                    continue;
+                }
+
+                if (i > 0 &&
+                    bytes[i - 1] >= 32 &&
+                    bytes[i - 1] <= 126)
+                {
+                    ++i;
+                    continue;
+                }
+
+                std::string candidate;
+                candidate.reserve(
+                    MAX_STRING_LENGTH);
+
+                size_t cursor = i;
+
+                while (cursor < region.size &&
+                       candidate.size() <
+                           MAX_STRING_LENGTH)
+                {
+                    const std::uint8_t c =
+                        bytes[cursor];
+
+                    if (c == 0)
+                        break;
+
+                    if (c < 32 || c > 126)
+                        break;
+
+                    candidate.push_back(
+                        static_cast<char>(c));
+                    ++cursor;
+                }
+
+                if (candidate.size() >= 4 &&
+                    cursor < region.size &&
+                    bytes[cursor] == 0)
+                {
+                    addHit(
+                        region.base + i,
+                        false,
+                        candidate);
+                }
+
+                i = cursor > i
+                    ? cursor + 1
+                    : i + 1;
+            }
+
+            // UTF-16 containing ordinary printable ASCII glyphs.
+            for (size_t i = 0;
+                 i + 1 < region.size &&
+                 tuningHits.size() <
+                     MAX_TUNING_HITS;
+                 ++i)
+            {
+                if ((region.base + i) & 1)
+                    continue;
+
+                if (bytes[i] < 32 ||
+                    bytes[i] > 126 ||
+                    bytes[i + 1] != 0)
+                {
+                    continue;
+                }
+
+                if (i >= 2 &&
+                    bytes[i - 2] >= 32 &&
+                    bytes[i - 2] <= 126 &&
+                    bytes[i - 1] == 0)
+                {
+                    continue;
+                }
+
+                std::string candidate;
+                candidate.reserve(
+                    MAX_STRING_LENGTH);
+
+                size_t cursor = i;
+
+                while (cursor + 1 <
+                           region.size &&
+                       candidate.size() <
+                           MAX_STRING_LENGTH &&
+                       bytes[cursor] >= 32 &&
+                       bytes[cursor] <= 126 &&
+                       bytes[cursor + 1] == 0)
+                {
+                    candidate.push_back(
+                        static_cast<char>(
+                            bytes[cursor]));
+                    cursor += 2;
+                }
+
+                if (candidate.size() >= 4 &&
+                    cursor + 1 <
+                        region.size &&
+                    bytes[cursor] == 0 &&
+                    bytes[cursor + 1] == 0)
+                {
+                    addHit(
+                        region.base + i,
+                        true,
+                        candidate);
+                }
+            }
+        }
+
+        std::sort(
+            tuningHits.begin(),
+            tuningHits.end(),
+            [](const TuningHit& a,
+               const TuningHit& b)
+            {
+                return a.address < b.address;
+            });
+
+        log << "PROCESS-WIDE TUNING TEXT HITS\n";
+        log << "  count: "
+            << tuningHits.size()
+            << "\n";
+
+        for (size_t i = 0;
+             i < tuningHits.size();
+             ++i)
+        {
+            const auto& hit = tuningHits[i];
+
+            MEMORY_BASIC_INFORMATION mbi{};
+            VirtualQuery(
+                reinterpret_cast<const void*>(
+                    hit.address),
+                &mbi,
+                sizeof(mbi));
+
+            log << "  HIT " << (i + 1)
+                << " "
+                << (hit.utf16
+                    ? "UTF16"
+                    : "ASCII")
+                << " @ "
+                << AddressText(hit.address)
+                << " type="
+                << memoryTypeName(mbi.Type)
+                << " text=\""
+                << hit.text
+                << "\" -> "
+                << VectorText(hit.tuning)
+                << " / "
+                << Name(hit.tuning);
+
+            if (hit.address == knownText)
+                log << "  <KNOWN SP TEXT>";
+
+            log << "\n";
+        }
+
+        if (tuningHits.empty())
+        {
+            log << "  No tuning-looking strings found in private memory.\n";
+        }
+
+        log << "\n";
+
+        std::unordered_map<
+            std::uintptr_t,
+            size_t> hitIndex;
+
+        for (size_t i = 0;
+             i < tuningHits.size();
+             ++i)
+        {
+            hitIndex[
+                tuningHits[i].address] = i;
+        }
+
+        std::vector<
+            PointerReference> stringReferences;
+
+        // Pass 2: locate every private-memory dword that points directly at a
+        // tuning-string hit. The single-player path's +0x44 field will appear
+        // here naturally, and an MP sibling using the same layout should too.
+        if (!hitIndex.empty())
+        {
+            for (const auto& region : regions)
+            {
+                if (stringReferences.size() >=
+                    MAX_STRING_REFERENCES)
+                {
+                    break;
+                }
+
+                const std::uintptr_t begin =
+                    (region.base + 3u) &
+                    ~static_cast<std::uintptr_t>(3u);
+
+                const std::uintptr_t end =
+                    region.base +
+                    static_cast<std::uintptr_t>(
+                        region.size);
+
+                for (std::uintptr_t address = begin;
+                     address + sizeof(std::uint32_t) <= end &&
+                     stringReferences.size() <
+                         MAX_STRING_REFERENCES;
+                     address += sizeof(std::uint32_t))
+                {
+                    const std::uint32_t value =
+                        *reinterpret_cast<
+                            const std::uint32_t*>(
+                                address);
+
+                    if (hitIndex.find(
+                            static_cast<std::uintptr_t>(
+                                value)) ==
+                        hitIndex.end())
+                    {
+                        continue;
+                    }
+
+                    stringReferences.push_back(
+                        {
+                            address,
+                            static_cast<std::uintptr_t>(
+                                value)
+                        });
+                }
+            }
+        }
+
+        log << "POINTER REFERENCES TO TUNING TEXT\n";
+        log << "  count: "
+            << stringReferences.size()
+            << "\n";
+
+        std::vector<UiCandidate> uiCandidates;
+        std::unordered_set<std::uintptr_t>
+            candidateBases;
+
+        for (const auto& reference :
+             stringReferences)
+        {
+            const auto hitIt =
+                hitIndex.find(
+                    reference.target);
+
+            if (hitIt == hitIndex.end())
+                continue;
+
+            const TuningHit& hit =
+                tuningHits[hitIt->second];
+
+            log << "  REF "
+                << AddressText(
+                    reference.location)
+                << " -> "
+                << AddressText(
+                    reference.target)
+                << " \""
+                << hit.text
+                << "\"";
+
+            if (reference.location >=
+                UI_TEXT_FIELD_OFFSET)
+            {
+                const std::uintptr_t candidateBase =
+                    reference.location -
+                    UI_TEXT_FIELD_OFFSET;
+
+                if (IsReadableRange(
+                        reinterpret_cast<const void*>(
+                            candidateBase),
+                        UI_OBJECT_INSPECT_BYTES))
+                {
+                    log << "  candidateBase="
+                        << AddressText(
+                            candidateBase);
+
+                    if (candidateBase == knownChild)
+                        log << " <KNOWN SP CHILD>";
+
+                    if (candidateBases.insert(
+                            candidateBase).second)
+                    {
+                        uiCandidates.push_back(
+                            {
+                                candidateBase,
+                                reference.target
+                            });
+                    }
+                }
+            }
+
+            log << "\n";
+        }
+
+        if (stringReferences.empty())
+            log << "  none\n";
+
+        log << "\nP1-STYLE +0x44 UI OBJECT CANDIDATES\n";
+        log << "  count: "
+            << uiCandidates.size()
+            << "\n";
+
+        for (size_t i = 0;
+             i < uiCandidates.size();
+             ++i)
+        {
+            const auto& candidate =
+                uiCandidates[i];
+
+            log << "  CANDIDATE "
+                << (i + 1)
+                << " base="
+                << AddressText(
+                    candidate.base);
+
+            if (candidate.base == knownChild)
+                log << " <KNOWN SP CHILD>";
+
+            log << "\n";
+
+            logUiField(
+                log,
+                candidate.base,
+                0x44,
+                "text");
+            logUiField(
+                log,
+                candidate.base,
+                0x5C,
+                "reference");
+            logUiField(
+                log,
+                candidate.base,
+                0x74,
+                "previous/menu");
+            logUiField(
+                log,
+                candidate.base,
+                0x8C,
+                "current menu");
+        }
+
+        log << "\n";
+
+        // Pass 3: work backward one more level. Find every pointer to a
+        // candidate UI object. If one lives directly in the known tuner root,
+        // we immediately get the clean root + siblingOffset + 0x44 path.
+        std::unordered_set<std::uintptr_t>
+            objectTargets;
+
+        for (const auto& candidate :
+             uiCandidates)
+        {
+            objectTargets.insert(
+                candidate.base);
+        }
+
+        std::vector<
+            PointerReference> objectReferences;
+
+        if (!objectTargets.empty())
+        {
+            for (const auto& region : regions)
+            {
+                if (objectReferences.size() >=
+                    MAX_OBJECT_REFERENCES)
+                {
+                    break;
+                }
+
+                const std::uintptr_t begin =
+                    (region.base + 3u) &
+                    ~static_cast<std::uintptr_t>(3u);
+
+                const std::uintptr_t end =
+                    region.base +
+                    static_cast<std::uintptr_t>(
+                        region.size);
+
+                for (std::uintptr_t address = begin;
+                     address + sizeof(std::uint32_t) <= end &&
+                     objectReferences.size() <
+                         MAX_OBJECT_REFERENCES;
+                     address += sizeof(std::uint32_t))
+                {
+                    const std::uintptr_t value =
+                        static_cast<std::uintptr_t>(
+                            *reinterpret_cast<
+                                const std::uint32_t*>(
+                                    address));
+
+                    if (objectTargets.find(value) ==
+                        objectTargets.end())
+                    {
+                        continue;
+                    }
+
+                    objectReferences.push_back(
+                        {
+                            address,
+                            value
+                        });
+                }
+            }
+        }
+
+        log << "POINTER REFERENCES TO P1-STYLE UI CANDIDATES\n";
+        log << "  count: "
+            << objectReferences.size()
+            << "\n";
+
+        for (const auto& reference :
+             objectReferences)
+        {
+            log << "  OBJREF "
+                << AddressText(
+                    reference.location)
+                << " -> "
+                << AddressText(
+                    reference.target);
+
+            if (rootObject &&
+                reference.location >= rootObject &&
+                reference.location <
+                    rootObject +
+                        ROOT_INSPECT_BYTES)
+            {
+                log << "  *** DIRECT ROOT +"
+                    << AddressText(
+                        reference.location -
+                        rootObject);
+            }
+
+            if (knownChild &&
+                reference.location >= knownChild &&
+                reference.location <
+                    knownChild +
+                        ROOT_INSPECT_BYTES)
+            {
+                log << "  inside knownChild +"
+                    << AddressText(
+                        reference.location -
+                        knownChild);
+            }
+
+            log << "\n";
+        }
+
+        if (objectReferences.empty())
+            log << "  none\n";
+
+        log << "\nSUMMARY\n";
+        log << "  private regions scanned: "
+            << regions.size()
+            << "\n";
+        log << "  tuning text hits: "
+            << tuningHits.size()
+            << "\n";
+        log << "  pointers to tuning text: "
+            << stringReferences.size()
+            << "\n";
+        log << "  +0x44 UI candidates: "
+            << uiCandidates.size()
+            << "\n";
+        log << "  pointers to UI candidates: "
+            << objectReferences.size()
+            << "\n";
         log << "============================================================\n\n";
 
         const std::wstring path =

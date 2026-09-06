@@ -42,8 +42,9 @@ namespace RocksmithTuning
     // Compatibility overload for existing single-player callers.
     bool TryReadTunerTarget(Tuning& tuning);
 
-    // Temporary F10 diagnostic. Performs a bounded, read-only walk of the tuner
-    // UI object graph and logs printable text/pointer paths.
+    // Temporary F10 diagnostic. Scans live private process memory for tuning
+    // strings, then works backward through pointer references to find P1-style
+    // UI objects and direct tuner-root sibling paths.
     bool CaptureDebugSnapshot();
 
     // Legacy/general target reader retained for diagnostics and other callers.
