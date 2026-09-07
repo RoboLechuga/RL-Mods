@@ -19,6 +19,7 @@ namespace Audio
 
         void SetSemitones(int semitones);
         void SetTuning(int semitones, int referenceHz);
+        void SetRatio(float ratio);
 
         bool IsNeutral() const;
 
@@ -33,6 +34,13 @@ namespace Audio
         static constexpr int STEP_SIZE = FFT_SIZE / OVERSAMPLE;
         static constexpr int FIFO_LATENCY = FFT_SIZE - STEP_SIZE;
 
+        enum class PathTransition
+        {
+            Stable,
+            FadeOut,
+            FadeIn
+        };
+
         static float RatioForTuning(int semitones, int referenceHz);
         static void Fft(float* buffer, long frameSize, long sign);
 
@@ -46,8 +54,10 @@ namespace Audio
         float currentRatio = 1.0f;
         float ratioStep = 1.0f;
 
-        float wetMix = 0.0f;
-        float wetStep = 1.0f;
+        bool usingWetPath = false;
+        PathTransition pathTransition = PathTransition::Stable;
+        float outputGain = 1.0f;
+        float duckStep = 1.0f;
 
         long rover = FIFO_LATENCY;
 

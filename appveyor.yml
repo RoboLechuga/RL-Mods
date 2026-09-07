@@ -1,6 +1,7 @@
 branches:
   only:
     - develop
+    - feature/auto-tune
 
 image: Visual Studio 2022
 configuration: Release
