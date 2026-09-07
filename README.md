@@ -39,6 +39,9 @@ Create or update `RLMods.ini` in the Rocksmith directory:
 [Rocksmith]
 Version=2022
 
+[OSD]
+DurationMs=5000
+
 [Screenshot]
 Enabled=1
 DelayMs=10000
@@ -75,7 +78,9 @@ Applies the same manual tuning controls to both players.
 
 ### Auto
 
-Auto uses Rocksmith's pre-song tuner as the authority.
+Auto is the default tuning mode. Press `F9` to cycle into the manual Player 1 / Player 2 / Sync modes when needed.
+
+Auto uses Rocksmith's pre-song tuner as the authority. The primary reader uses Rocksmith's six-string tuner target object directly, including custom tunings; the legacy single-player tuner text path is retained only as a compatibility fallback.
 
 When a pre-song tuner appears, RL-Mods reads the target tuning and applies the useful whole-guitar downshift before Rocksmith checks the strings. Any remaining non-uniform string changes are performed physically in Rocksmith's tuner.
 
@@ -95,6 +100,15 @@ This also supports Nonstop Play: if Rocksmith presents another pre-song tuner, A
 ## Tuning OSD
 
 The tuning OSD shows the active tuning mode, guitar tuning, effective target, pitch shift, and reference frequency.
+
+The OSD hold time is configurable in `RLMods.ini`:
+
+```ini
+[OSD]
+DurationMs=5000
+```
+
+`DurationMs` is clamped to 500–60000 ms. If omitted, RL-Mods keeps the previous 2200 ms default.
 
 Single-player and multiplayer layouts are sized independently. Multiplayer display is based on Rocksmith's multiplayer state rather than merely detecting a second configured ASIO input.
 
