@@ -1467,21 +1467,308 @@ namespace RocksmithTuning
 
     bool CaptureDebugSnapshot()
     {
-        MultiplayerDirectTrace trace{};
-        Tuning player1{};
-        Tuning player2{};
+        // V7 maps only the missing single-player leaf. V6 proved that SP and
+        // MP share the root -> +0x10 -> +0xD0 -> +0x94 spine, while the MP
+        // +0x10/+0x18 owner tail is not valid in single player. Start at that
+        // shared container and inspect only its small reachable object graph
+        // for the already-proven tuning-owner shape:
+        //   owner +0x38 = six MIDI notes
+        //   owner +0x50 = six semitone offsets
+        // with MIDI[i] == standardMidi[i] + offset[i].
+        constexpr size_t OBJECT_SCAN_BYTES = 0x300;
+        constexpr int MAX_DEPTH = 4;
+        constexpr size_t MAX_NODES = 900;
+        constexpr size_t MAX_OWNER_HITS = 64;
+        constexpr size_t MAX_POINTER_LOG = 160;
 
-        const bool directOk =
-            TryReadDirectMultiplayerTargets(
-                player1,
-                player2,
-                &trace);
+        struct Node
+        {
+            std::uintptr_t address = 0;
+            int depth = 0;
+            int parent = -1;
+            std::uintptr_t viaOffset = 0;
+        };
+
+        struct OwnerHit
+        {
+            std::uintptr_t owner = 0;
+            std::uint32_t signature = 0;
+            Tuning tuning{};
+            std::array<std::int32_t, 6> midi{};
+            int nodeIndex = -1;
+        };
+
+        struct PointerLog
+        {
+            std::uintptr_t source = 0;
+            std::uintptr_t offset = 0;
+            std::uintptr_t target = 0;
+            int depth = 0;
+        };
+
+        auto readablePrivatePointer =
+            [](std::uintptr_t address) -> bool
+            {
+                if (!address)
+                    return false;
+
+                MEMORY_BASIC_INFORMATION mbi{};
+                if (!VirtualQuery(
+                        reinterpret_cast<const void*>(address),
+                        &mbi,
+                        sizeof(mbi)))
+                {
+                    return false;
+                }
+
+                if (mbi.State != MEM_COMMIT ||
+                    (mbi.Protect & PAGE_GUARD) ||
+                    (mbi.Protect & PAGE_NOACCESS) ||
+                    mbi.Type != MEM_PRIVATE)
+                {
+                    return false;
+                }
+
+                const DWORD readable =
+                    PAGE_READONLY |
+                    PAGE_READWRITE |
+                    PAGE_WRITECOPY |
+                    PAGE_EXECUTE_READ |
+                    PAGE_EXECUTE_READWRITE |
+                    PAGE_EXECUTE_WRITECOPY;
+
+                return (mbi.Protect & readable) != 0;
+            };
+
+        HMODULE gameModule =
+            GetModuleHandleW(nullptr);
+
+        const std::uintptr_t gameBase =
+            reinterpret_cast<std::uintptr_t>(gameModule);
+
+        auto signatureIsGameImage =
+            [gameBase](std::uint32_t signature) -> bool
+            {
+                if (!signature || !gameBase)
+                    return false;
+
+                MEMORY_BASIC_INFORMATION mbi{};
+                if (!VirtualQuery(
+                        reinterpret_cast<const void*>(
+                            static_cast<std::uintptr_t>(signature)),
+                        &mbi,
+                        sizeof(mbi)))
+                {
+                    return false;
+                }
+
+                return
+                    mbi.State == MEM_COMMIT &&
+                    mbi.Type == MEM_IMAGE &&
+                    reinterpret_cast<std::uintptr_t>(
+                        mbi.AllocationBase) == gameBase;
+            };
+
+        std::uintptr_t rootSlot = 0;
+        std::uintptr_t rootObject = 0;
+        std::uintptr_t stage1 = 0;
+        std::uintptr_t stage2 = 0;
+        std::uintptr_t container = 0;
+
+        if (gameModule)
+        {
+            const std::uintptr_t rootOffset =
+                GetExecutableVersion() ==
+                    ExecutableVersion::LearnAndPlay2024
+                ? TUNER_TEXT_2024_ROOT_OFFSET
+                : TUNER_TEXT_2022_ROOT;
+
+            rootSlot = gameBase + rootOffset;
+
+            if (!SafeReadProcessValue(
+                    rootSlot,
+                    rootObject) ||
+                !rootObject ||
+                !SafeReadProcessValue(
+                    rootObject + MP_ROOT_TO_STAGE1,
+                    stage1) ||
+                !stage1 ||
+                !SafeReadProcessValue(
+                    stage1 + MP_STAGE1_TO_STAGE2,
+                    stage2) ||
+                !stage2 ||
+                !SafeReadProcessValue(
+                    stage2 + MP_STAGE2_TO_PAIR,
+                    container))
+            {
+                container = 0;
+            }
+        }
+
+        std::vector<Node> nodes;
+        std::unordered_set<std::uintptr_t> visited;
+        std::vector<OwnerHit> ownerHits;
+        std::vector<PointerLog> pointerLog;
+
+        if (container &&
+            readablePrivatePointer(container))
+        {
+            nodes.push_back(
+                { container, 0, -1, 0 });
+            visited.insert(container);
+        }
+
+        for (size_t cursor = 0;
+             cursor < nodes.size() &&
+             cursor < MAX_NODES;
+             ++cursor)
+        {
+            const Node node = nodes[cursor];
+
+            std::uint32_t signature = 0;
+            Tuning tuning{};
+            std::array<std::int32_t, 6> midi{};
+
+            if (SafeReadProcessValue(
+                    node.address,
+                    signature) &&
+                signatureIsGameImage(signature) &&
+                ReadDirectOwnerTuning(
+                    node.address,
+                    tuning,
+                    &midi))
+            {
+                bool duplicate = false;
+                for (const auto& hit : ownerHits)
+                {
+                    if (hit.owner == node.address)
+                    {
+                        duplicate = true;
+                        break;
+                    }
+                }
+
+                if (!duplicate &&
+                    ownerHits.size() < MAX_OWNER_HITS)
+                {
+                    ownerHits.push_back(
+                        {
+                            node.address,
+                            signature,
+                            tuning,
+                            midi,
+                            static_cast<int>(cursor)
+                        });
+                }
+            }
+
+            if (node.depth >= MAX_DEPTH)
+                continue;
+
+            for (std::uintptr_t offset = 0;
+                 offset < OBJECT_SCAN_BYTES;
+                 offset += sizeof(std::uint32_t))
+            {
+                std::uint32_t raw = 0;
+                if (!SafeReadProcessValue(
+                        node.address + offset,
+                        raw))
+                {
+                    continue;
+                }
+
+                const std::uintptr_t target =
+                    static_cast<std::uintptr_t>(raw);
+
+                if (!target ||
+                    target == node.address ||
+                    !readablePrivatePointer(target))
+                {
+                    continue;
+                }
+
+                if (pointerLog.size() < MAX_POINTER_LOG)
+                {
+                    pointerLog.push_back(
+                        {
+                            node.address,
+                            offset,
+                            target,
+                            node.depth
+                        });
+                }
+
+                if (visited.insert(target).second &&
+                    nodes.size() < MAX_NODES)
+                {
+                    nodes.push_back(
+                        {
+                            target,
+                            node.depth + 1,
+                            static_cast<int>(cursor),
+                            offset
+                        });
+                }
+            }
+        }
+
+        auto appendPath =
+            [&nodes](
+                std::ostringstream& log,
+                int nodeIndex)
+            {
+                if (nodeIndex < 0 ||
+                    static_cast<size_t>(nodeIndex) >=
+                        nodes.size())
+                {
+                    log << "<unavailable>";
+                    return;
+                }
+
+                std::vector<int> chain;
+                int current = nodeIndex;
+
+                while (current >= 0 &&
+                       static_cast<size_t>(current) <
+                           nodes.size())
+                {
+                    chain.push_back(current);
+                    current = nodes[current].parent;
+                }
+
+                std::reverse(
+                    chain.begin(),
+                    chain.end());
+
+                if (chain.empty())
+                {
+                    log << "<empty>";
+                    return;
+                }
+
+                log << AddressText(
+                    nodes[chain[0]].address);
+
+                for (size_t i = 1;
+                     i < chain.size();
+                     ++i)
+                {
+                    log << " +0x"
+                        << std::uppercase
+                        << std::hex
+                        << nodes[chain[i]].viaOffset
+                        << std::dec
+                        << " -> "
+                        << AddressText(
+                            nodes[chain[i]].address);
+                }
+            };
 
         std::ostringstream log;
 
         log << "============================================================\n";
-        log << "RL-Mods multiplayer tuner direct-chain reader\n";
-        log << "BUILD: MP_TARGET_V6_DIRECT_CHAIN\n";
+        log << "RL-Mods single-player tuner leaf locator\n";
+        log << "BUILD: SP_TARGET_V7_FOCUSED_LEAF\n";
 
         SYSTEMTIME now{};
         GetLocalTime(&now);
@@ -1498,78 +1785,101 @@ namespace RocksmithTuning
             << CurrentMenu() << "\n";
         log << "Builder hook: DISABLED\n";
         log << "Process-wide scans: NONE\n";
-        log << "Read method: ReadProcessMemory, fixed pointer chain\n\n";
+        log << "Search scope: shared +0x94 container, 0x300 bytes/object, depth 4\n";
+        log << "Owner validation: game-image signature + MIDI/offset relationship\n\n";
 
-        log << "DIRECT CHAIN\n";
+        log << "SHARED SPINE\n";
         log << "  root slot:   "
-            << AddressText(trace.rootSlot) << "\n";
+            << AddressText(rootSlot) << "\n";
         log << "  root object: "
-            << AddressText(trace.rootObject) << "\n";
+            << AddressText(rootObject) << "\n";
         log << "  root+0x10:   "
-            << AddressText(trace.stage1) << "\n";
+            << AddressText(stage1) << "\n";
         log << "  +0xD0:       "
-            << AddressText(trace.stage2) << "\n";
+            << AddressText(stage2) << "\n";
         log << "  +0x94:       "
-            << AddressText(trace.pair)
-            << "  <P1/P2 container>\n";
-        log << "  pair+0x10:   "
-            << AddressText(trace.ownerA)
-            << "  <owner A / assumed P1>\n";
-        log << "  pair+0x18:   "
-            << AddressText(trace.ownerB)
-            << "  <owner B / assumed P2>\n\n";
+            << AddressText(container)
+            << "  <SP leaf search root>\n\n";
 
-        log << "OWNER VALIDATION\n";
-        log << "  signature A: "
-            << AddressText(trace.signatureA) << "\n";
-        log << "  signature B: "
-            << AddressText(trace.signatureB) << "\n";
-        log << "  owner A MIDI: [";
-        for (size_t i = 0; i < trace.midiA.size(); ++i)
+        log << "FOCUSED GRAPH\n";
+        log << "  nodes visited: "
+            << nodes.size() << " / "
+            << MAX_NODES << "\n";
+        log << "  validated tuning owners: "
+            << ownerHits.size() << "\n\n";
+
+        if (!ownerHits.empty())
         {
-            if (i) log << ",";
-            log << trace.midiA[i];
+            log << "VALIDATED OWNER HITS\n";
+
+            for (size_t h = 0;
+                 h < ownerHits.size();
+                 ++h)
+            {
+                const auto& hit = ownerHits[h];
+
+                log << "  HIT " << (h + 1)
+                    << " owner="
+                    << AddressText(hit.owner)
+                    << " signature="
+                    << AddressText(hit.signature)
+                    << " target="
+                    << VectorText(hit.tuning)
+                    << " / " << Name(hit.tuning)
+                    << "\n";
+
+                log << "    MIDI: [";
+                for (size_t i = 0;
+                     i < hit.midi.size();
+                     ++i)
+                {
+                    if (i) log << ",";
+                    log << hit.midi[i];
+                }
+                log << "]\n";
+
+                log << "    PATH: ";
+                appendPath(log, hit.nodeIndex);
+                log << "\n";
+                log << "    leaf target field: owner +0x50\n";
+            }
+
+            log << "\n";
         }
-        log << "]  valid="
-            << (trace.ownerAValid ? "yes" : "no")
-            << "\n";
-        log << "  owner A target: "
-            << VectorText(trace.tuningA)
-            << " / " << Name(trace.tuningA)
-            << "\n";
 
-        log << "  owner B MIDI: [";
-        for (size_t i = 0; i < trace.midiB.size(); ++i)
+        log << "EARLY POINTERS FROM FOCUSED WALK\n";
+        log << "  count logged: "
+            << pointerLog.size() << "\n";
+
+        for (size_t i = 0;
+             i < pointerLog.size();
+             ++i)
         {
-            if (i) log << ",";
-            log << trace.midiB[i];
+            const auto& p = pointerLog[i];
+            log << "  depth " << p.depth
+                << " " << AddressText(p.source)
+                << " +0x"
+                << std::uppercase
+                << std::hex
+                << p.offset
+                << std::dec
+                << " -> "
+                << AddressText(p.target)
+                << "\n";
         }
-        log << "]  valid="
-            << (trace.ownerBValid ? "yes" : "no")
-            << "\n";
-        log << "  owner B target: "
-            << VectorText(trace.tuningB)
-            << " / " << Name(trace.tuningB)
-            << "\n\n";
 
-        log << "RESULT\n";
-        log << "  direct chain: "
-            << (directOk ? "VALID" : "FAILED")
-            << "\n";
+        log << "\nRESULT\n";
 
-        if (directOk)
+        if (ownerHits.empty())
         {
-            log << "  assumed P1: "
-                << VectorText(player1)
-                << " / " << Name(player1)
-                << "\n";
-            log << "  assumed P2: "
-                << VectorText(player2)
-                << " / " << Name(player2)
-                << "\n";
-            log << "  production candidate: "
-                << "root -> +0x10 -> +0xD0 -> +0x94 -> "
-                << "(+0x10/+0x18 owners) -> +0x50 target\n";
+            log << "  no validated SP tuning owner found within focused depth\n";
+            log << "  next step: widen only this container graph, not the process\n";
+        }
+        else
+        {
+            log << "  candidate SP leaf path(s) found: "
+                << ownerHits.size() << "\n";
+            log << "  compare against visible custom tuning before production use\n";
         }
 
         int referenceHz = 0;
