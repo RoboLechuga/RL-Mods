@@ -9,14 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <deque>
-#include <iomanip>
-#include <sstream>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
-#include <vector>
 
 namespace RocksmithTuning
 {
@@ -209,42 +202,6 @@ namespace RocksmithTuning
                     0,
                     slash + 1) +
                 L"RLMods.ini";
-        }
-
-        std::wstring BuildGamePath(
-            const wchar_t* fileName)
-        {
-            wchar_t path[MAX_PATH] = {};
-
-            const DWORD length =
-                GetModuleFileNameW(
-                    nullptr,
-                    path,
-                    MAX_PATH);
-
-            if (length == 0 ||
-                length >= MAX_PATH)
-            {
-                return fileName;
-            }
-
-            std::wstring fullPath(path);
-
-            const size_t slash =
-                fullPath.find_last_of(
-                    L"\\/");
-
-            if (slash ==
-                std::wstring::npos)
-            {
-                return fileName;
-            }
-
-            return
-                fullPath.substr(
-                    0,
-                    slash + 1) +
-                fileName;
         }
 
         ExecutableVersion ReadExecutableVersion()
@@ -482,275 +439,6 @@ namespace RocksmithTuning
             }
 
             return result;
-        }
-
-        std::string AddressText(
-            std::uintptr_t address)
-        {
-            std::ostringstream text;
-
-            text << "0x"
-                 << std::uppercase
-                 << std::hex
-                 << std::setw(
-                        static_cast<int>(
-                            sizeof(std::uintptr_t) * 2))
-                 << std::setfill('0')
-                 << address;
-
-            return text.str();
-        }
-
-        template <size_t N>
-        std::uintptr_t TracePointerChain(
-            std::ostringstream& log,
-            const char* label,
-            std::uintptr_t root,
-            const std::array<
-                std::uintptr_t,
-                N>& offsets)
-        {
-            log << label << "\n";
-            log << "  root: "
-                << AddressText(root)
-                << "\n";
-
-            std::uintptr_t address = root;
-
-            for (size_t i = 0;
-                 i < offsets.size();
-                 ++i)
-            {
-                log << "  step "
-                    << i
-                    << ": read "
-                    << AddressText(address);
-
-                std::uintptr_t next = 0;
-
-                if (!TryReadValue(
-                        address,
-                        next))
-                {
-                    log << " -> UNREADABLE\n";
-                    return 0;
-                }
-
-                log << " -> "
-                    << AddressText(next);
-
-                if (next == 0)
-                {
-                    log << " -> NULL\n";
-                    return 0;
-                }
-
-                if (next >
-                    UINTPTR_MAX -
-                    offsets[i])
-                {
-                    log << " -> OVERFLOW\n";
-                    return 0;
-                }
-
-                address =
-                    next +
-                    offsets[i];
-
-                log << " + "
-                    << AddressText(
-                        offsets[i])
-                    << " = "
-                    << AddressText(address)
-                    << "\n";
-            }
-
-            log << "  final: "
-                << AddressText(address)
-                << "\n";
-
-            return address;
-        }
-
-        void TraceRawBytes(
-            std::ostringstream& log,
-            std::uintptr_t address,
-            size_t bytes)
-        {
-            log << "  raw: ";
-
-            for (size_t i = 0;
-                 i < bytes;
-                 ++i)
-            {
-                std::uint8_t value = 0;
-
-                if (!TryReadValue(
-                        address + i,
-                        value))
-                {
-                    log << "<unreadable at +0x"
-                        << std::hex
-                        << std::uppercase
-                        << i
-                        << std::dec
-                        << ">";
-                    break;
-                }
-
-                if (i != 0)
-                    log << ' ';
-
-                log << std::uppercase
-                    << std::hex
-                    << std::setw(2)
-                    << std::setfill('0')
-                    << static_cast<int>(value)
-                    << std::dec;
-            }
-
-            log << "\n";
-        }
-
-        template <size_t N>
-        void TraceStringPointer(
-            std::ostringstream& log,
-            const char* label,
-            std::uintptr_t root,
-            const std::array<
-                std::uintptr_t,
-                N>& offsets)
-        {
-            const std::uintptr_t address =
-                TracePointerChain(
-                    log,
-                    label,
-                    root,
-                    offsets);
-
-            if (!address)
-            {
-                log << "  result: FAILED\n\n";
-                return;
-            }
-
-            TraceRawBytes(
-                log,
-                address,
-                32);
-
-            const std::string text =
-                ReadString(
-                    address,
-                    128);
-
-            log << "  text: "
-                << (text.empty()
-                    ? "<empty/unreadable>"
-                    : text)
-                << "\n\n";
-        }
-
-        template <size_t N>
-        void TraceArrangementPointer(
-            std::ostringstream& log,
-            const char* label,
-            std::uintptr_t root,
-            const std::array<
-                std::uintptr_t,
-                N>& offsets)
-        {
-            const std::uintptr_t address =
-                TracePointerChain(
-                    log,
-                    label,
-                    root,
-                    offsets);
-
-            if (!address)
-            {
-                log << "  result: FAILED\n\n";
-                return;
-            }
-
-            TraceRawBytes(
-                log,
-                address,
-                16);
-
-            log << "  strings raw/signed: ";
-
-            for (size_t i = 0;
-                 i < STRING_BYTE_OFFSETS.size();
-                 ++i)
-            {
-                std::uint8_t raw = 0;
-
-                if (!TryReadValue(
-                        address +
-                            STRING_BYTE_OFFSETS[i],
-                        raw))
-                {
-                    log << "<unreadable>";
-                    break;
-                }
-
-                const int value =
-                    static_cast<int>(
-                        static_cast<std::int8_t>(
-                            raw));
-
-                if (i != 0)
-                    log << ", ";
-
-                log << static_cast<int>(raw)
-                    << '/'
-                    << value;
-            }
-
-            log << "\n\n";
-        }
-
-        template <size_t N>
-        void TraceFloatPointer(
-            std::ostringstream& log,
-            const char* label,
-            std::uintptr_t root,
-            const std::array<
-                std::uintptr_t,
-                N>& offsets)
-        {
-            const std::uintptr_t address =
-                TracePointerChain(
-                    log,
-                    label,
-                    root,
-                    offsets);
-
-            if (!address)
-            {
-                log << "  result: FAILED\n\n";
-                return;
-            }
-
-            float value = 0.0f;
-
-            if (!TryReadValue(
-                    address,
-                    value))
-            {
-                log << "  float: UNREADABLE\n\n";
-                return;
-            }
-
-            TraceRawBytes(
-                log,
-                address,
-                sizeof(float));
-
-            log << "  float: "
-                << value
-                << "\n\n";
         }
 
         void ReplaceAll(
@@ -1111,50 +799,31 @@ namespace RocksmithTuning
             return true;
         }
 
-        // V6: direct multiplayer tuner path recovered by the V5 reverse walk.
-        // 2022 observed path:
+        // Unified read-only tuner-object path for single-player and multiplayer.
+        // Verified 2022 path:
         //   root slot -> root object
         //   root +0x10 -> stage 1
         //   stage1 +0xD0 -> stage 2
-        //   stage2 +0x94 -> P1/P2 container
-        //   container +0x10 -> owner A
-        //   container +0x18 -> owner B
+        //   stage2 +0x94 -> tuner target container
+        //   container +0x10 -> SP/P1 owner
+        //   container +0x18 -> P2 owner (multiplayer)
         //   owner +0x38 -> six MIDI notes
         //   owner +0x50 -> six semitone offsets
         //
         // The owner is accepted only when every MIDI note exactly equals the
         // standard-string MIDI note plus the corresponding semitone offset.
         // This keeps the normal reader narrow and avoids process-wide scans.
-        constexpr std::uintptr_t MP_ROOT_TO_STAGE1 = 0x10;
-        constexpr std::uintptr_t MP_STAGE1_TO_STAGE2 = 0xD0;
-        constexpr std::uintptr_t MP_STAGE2_TO_PAIR = 0x94;
-        constexpr std::uintptr_t MP_PAIR_TO_OWNER_A = 0x10;
-        constexpr std::uintptr_t MP_PAIR_TO_OWNER_B = 0x18;
-        constexpr std::uintptr_t MP_OWNER_MIDI = 0x38;
-        constexpr std::uintptr_t MP_OWNER_TARGET = 0x50;
+        constexpr std::uintptr_t TUNER_ROOT_TO_STAGE1 = 0x10;
+        constexpr std::uintptr_t TUNER_STAGE1_TO_STAGE2 = 0xD0;
+        constexpr std::uintptr_t TUNER_STAGE2_TO_CONTAINER = 0x94;
+        constexpr std::uintptr_t TUNER_CONTAINER_TO_P1_OWNER = 0x10;
+        constexpr std::uintptr_t TUNER_CONTAINER_TO_P2_OWNER = 0x18;
+        constexpr std::uintptr_t TUNER_OWNER_MIDI = 0x38;
+        constexpr std::uintptr_t TUNER_OWNER_TARGET = 0x50;
 
         constexpr std::array<std::int32_t, 6> STANDARD_MIDI =
         {
             40, 45, 50, 55, 59, 64
-        };
-
-        struct MultiplayerDirectTrace
-        {
-            std::uintptr_t rootSlot = 0;
-            std::uintptr_t rootObject = 0;
-            std::uintptr_t stage1 = 0;
-            std::uintptr_t stage2 = 0;
-            std::uintptr_t pair = 0;
-            std::uintptr_t ownerA = 0;
-            std::uintptr_t ownerB = 0;
-            std::uint32_t signatureA = 0;
-            std::uint32_t signatureB = 0;
-            std::array<std::int32_t, 6> midiA{};
-            std::array<std::int32_t, 6> midiB{};
-            Tuning tuningA{};
-            Tuning tuningB{};
-            bool ownerAValid = false;
-            bool ownerBValid = false;
         };
 
         template <typename T>
@@ -1177,17 +846,45 @@ namespace RocksmithTuning
                 bytesRead == sizeof(T);
         }
 
+        bool IsGameImageAddress(
+            std::uintptr_t address)
+        {
+            if (!address)
+                return false;
+
+            HMODULE gameModule =
+                GetModuleHandleW(nullptr);
+
+            if (!gameModule)
+                return false;
+
+            MEMORY_BASIC_INFORMATION mbi{};
+
+            if (!VirtualQuery(
+                    reinterpret_cast<const void*>(address),
+                    &mbi,
+                    sizeof(mbi)))
+            {
+                return false;
+            }
+
+            return
+                mbi.State == MEM_COMMIT &&
+                mbi.Type == MEM_IMAGE &&
+                reinterpret_cast<std::uintptr_t>(
+                    mbi.AllocationBase) ==
+                    reinterpret_cast<std::uintptr_t>(
+                        gameModule);
+        }
+
         bool ReadDirectOwnerTuning(
             std::uintptr_t owner,
-            Tuning& tuning,
-            std::array<std::int32_t, 6>* midiOut = nullptr)
+            Tuning& tuning)
         {
             if (!owner)
                 return false;
 
             Tuning candidate{};
-            std::array<std::int32_t, 6> midi{};
-
             for (size_t i = 0;
                  i < candidate.strings.size();
                  ++i)
@@ -1197,12 +894,12 @@ namespace RocksmithTuning
 
                 if (!SafeReadProcessValue(
                         owner +
-                            MP_OWNER_TARGET +
+                            TUNER_OWNER_TARGET +
                             i * sizeof(std::int32_t),
                         offset) ||
                     !SafeReadProcessValue(
                         owner +
-                            MP_OWNER_MIDI +
+                            TUNER_OWNER_MIDI +
                             i * sizeof(std::int32_t),
                         note))
                 {
@@ -1220,34 +917,16 @@ namespace RocksmithTuning
 
                 candidate.strings[i] =
                     static_cast<int>(offset);
-                midi[i] = note;
             }
 
             tuning = candidate;
-
-            if (midiOut)
-                *midiOut = midi;
-
             return true;
         }
 
-        bool IsDirectMultiplayerTunerMenu(
-            const std::string& menu)
+        bool ResolveDirectTunerContainer(
+            std::uintptr_t& container)
         {
-            return
-                menu == "LearnASong_PreSongTunerMP" ||
-                menu == "NonStopPlay_PreSongTunerMP" ||
-                menu == "SessionMode_PreSMTunerMP" ||
-                menu == "Duet_PreSongTuner" ||
-                menu == "H2H_PreSongTuner";
-        }
-
-        bool TryReadDirectMultiplayerTargets(
-            Tuning& player1,
-            Tuning& player2,
-            MultiplayerDirectTrace* trace = nullptr)
-        {
-            MultiplayerDirectTrace local{};
+            container = 0;
 
             HMODULE gameModule =
                 GetModuleHandleW(nullptr);
@@ -1265,90 +944,134 @@ namespace RocksmithTuning
                 ? TUNER_TEXT_2024_ROOT_OFFSET
                 : TUNER_TEXT_2022_ROOT;
 
-            local.rootSlot =
+            const std::uintptr_t rootSlot =
                 base + rootOffset;
 
+            std::uintptr_t rootObject = 0;
+            std::uintptr_t stage1 = 0;
+            std::uintptr_t stage2 = 0;
+
             if (!SafeReadProcessValue(
-                    local.rootSlot,
-                    local.rootObject) ||
-                !local.rootObject ||
+                    rootSlot,
+                    rootObject) ||
+                !rootObject ||
                 !SafeReadProcessValue(
-                    local.rootObject +
-                        MP_ROOT_TO_STAGE1,
-                    local.stage1) ||
-                !local.stage1 ||
+                    rootObject +
+                        TUNER_ROOT_TO_STAGE1,
+                    stage1) ||
+                !stage1 ||
                 !SafeReadProcessValue(
-                    local.stage1 +
-                        MP_STAGE1_TO_STAGE2,
-                    local.stage2) ||
-                !local.stage2 ||
+                    stage1 +
+                        TUNER_STAGE1_TO_STAGE2,
+                    stage2) ||
+                !stage2 ||
                 !SafeReadProcessValue(
-                    local.stage2 +
-                        MP_STAGE2_TO_PAIR,
-                    local.pair) ||
-                !local.pair ||
-                !SafeReadProcessValue(
-                    local.pair +
-                        MP_PAIR_TO_OWNER_A,
-                    local.ownerA) ||
-                !local.ownerA ||
-                !SafeReadProcessValue(
-                    local.pair +
-                        MP_PAIR_TO_OWNER_B,
-                    local.ownerB) ||
-                !local.ownerB ||
-                local.ownerA == local.ownerB)
+                    stage2 +
+                        TUNER_STAGE2_TO_CONTAINER,
+                    container) ||
+                !container)
             {
-                if (trace)
-                    *trace = local;
+                container = 0;
                 return false;
             }
 
-            SafeReadProcessValue(
-                local.ownerA,
-                local.signatureA);
-            SafeReadProcessValue(
-                local.ownerB,
-                local.signatureB);
+            return true;
+        }
 
-            // The twin objects found by V4/V5 are instances of the same class.
-            // Do not hard-code the 2022 vtable address so the 2024 build still
-            // has a chance to validate through the MIDI/offset relationship.
-            if (!local.signatureA ||
-                local.signatureA !=
-                    local.signatureB)
+        bool TryReadDirectSinglePlayerTarget(
+            Tuning& tuning)
+        {
+            std::uintptr_t container = 0;
+            std::uintptr_t owner = 0;
+            std::uint32_t signature = 0;
+
+            if (!ResolveDirectTunerContainer(
+                    container) ||
+                !SafeReadProcessValue(
+                    container +
+                        TUNER_CONTAINER_TO_P1_OWNER,
+                    owner) ||
+                !owner ||
+                !SafeReadProcessValue(
+                    owner,
+                    signature) ||
+                !IsGameImageAddress(
+                    static_cast<std::uintptr_t>(
+                        signature)))
             {
-                if (trace)
-                    *trace = local;
                 return false;
             }
 
-            local.ownerAValid =
+            return
                 ReadDirectOwnerTuning(
-                    local.ownerA,
-                    local.tuningA,
-                    &local.midiA);
+                    owner,
+                    tuning);
+        }
 
-            local.ownerBValid =
-                ReadDirectOwnerTuning(
-                    local.ownerB,
-                    local.tuningB,
-                    &local.midiB);
+        bool IsDirectMultiplayerTunerMenu(
+            const std::string& menu)
+        {
+            return
+                menu == "LearnASong_PreSongTunerMP" ||
+                menu == "NonStopPlay_PreSongTunerMP" ||
+                menu == "SessionMode_PreSMTunerMP" ||
+                menu == "Duet_PreSongTuner" ||
+                menu == "H2H_PreSongTuner";
+        }
 
-            if (trace)
-                *trace = local;
+        bool TryReadDirectMultiplayerTargets(
+            Tuning& player1,
+            Tuning& player2)
+        {
+            std::uintptr_t container = 0;
+            std::uintptr_t owner1 = 0;
+            std::uintptr_t owner2 = 0;
+            std::uint32_t signature1 = 0;
+            std::uint32_t signature2 = 0;
 
-            if (!local.ownerAValid ||
-                !local.ownerBValid)
+            if (!ResolveDirectTunerContainer(
+                    container) ||
+                !SafeReadProcessValue(
+                    container +
+                        TUNER_CONTAINER_TO_P1_OWNER,
+                    owner1) ||
+                !owner1 ||
+                !SafeReadProcessValue(
+                    container +
+                        TUNER_CONTAINER_TO_P2_OWNER,
+                    owner2) ||
+                !owner2 ||
+                owner1 == owner2 ||
+                !SafeReadProcessValue(
+                    owner1,
+                    signature1) ||
+                !SafeReadProcessValue(
+                    owner2,
+                    signature2) ||
+                !signature1 ||
+                signature1 != signature2 ||
+                !IsGameImageAddress(
+                    static_cast<std::uintptr_t>(
+                        signature1)))
             {
                 return false;
             }
 
-            // V5 exposed the pair in this order at container +0x10/+0x18.
-            // V6 deliberately treats that ordering as P1/P2 so a mixed-tuning
-            // tuner screen can confirm the final player mapping.
-            player1 = local.tuningA;
-            player2 = local.tuningB;
+            Tuning target1{};
+            Tuning target2{};
+
+            if (!ReadDirectOwnerTuning(
+                    owner1,
+                    target1) ||
+                !ReadDirectOwnerTuning(
+                    owner2,
+                    target2))
+            {
+                return false;
+            }
+
+            player1 = target1;
+            player2 = target2;
             return true;
         }
 
@@ -1406,17 +1129,6 @@ namespace RocksmithTuning
                 GAME_SUFFIX) == 0;
     }
 
-    bool InitializeTunerTargetCapture()
-    {
-        // Deliberately no hook in this diagnostic build.
-        return true;
-    }
-
-    void ShutdownTunerTargetCapture()
-    {
-        // Nothing installed.
-    }
-
     bool TryReadTunerTarget(
         int player,
         Tuning& tuning)
@@ -1430,30 +1142,45 @@ namespace RocksmithTuning
         const std::string menu =
             CurrentMenu();
 
+        if (!IsPreSongTunerMenu(menu))
+            return false;
+
         if (IsDirectMultiplayerTunerMenu(menu))
         {
             Tuning player1{};
             Tuning player2{};
 
-            if (!TryReadDirectMultiplayerTargets(
+            if (TryReadDirectMultiplayerTargets(
                     player1,
                     player2))
             {
-                return false;
+                tuning =
+                    player == 0
+                    ? player1
+                    : player2;
+
+                return true;
             }
 
-            tuning =
-                player == 0
-                ? player1
-                : player2;
-
-            return true;
+            // The multiplayer text path is known not to expose the P1/P2
+            // rendered tuning labels through the single-player text object.
+            return false;
         }
 
-        // Single-player keeps the already-proven tuner text path.
         if (player != 0)
             return false;
 
+        // The structural owner is the authoritative SP source. It carries the
+        // six actual string targets, so arbitrary custom tunings work even when
+        // Rocksmith only renders a generic/custom label.
+        if (TryReadDirectSinglePlayerTarget(
+                tuning))
+        {
+            return true;
+        }
+
+        // Compatibility fallback for an executable/layout where the structural
+        // path does not resolve but the legacy single-player tuner text does.
         return TryReadTunerTextTuning(tuning);
     }
 
@@ -1463,450 +1190,6 @@ namespace RocksmithTuning
         return TryReadTunerTarget(
             0,
             tuning);
-    }
-
-    bool CaptureDebugSnapshot()
-    {
-        // V7 maps only the missing single-player leaf. V6 proved that SP and
-        // MP share the root -> +0x10 -> +0xD0 -> +0x94 spine, while the MP
-        // +0x10/+0x18 owner tail is not valid in single player. Start at that
-        // shared container and inspect only its small reachable object graph
-        // for the already-proven tuning-owner shape:
-        //   owner +0x38 = six MIDI notes
-        //   owner +0x50 = six semitone offsets
-        // with MIDI[i] == standardMidi[i] + offset[i].
-        constexpr size_t OBJECT_SCAN_BYTES = 0x300;
-        constexpr int MAX_DEPTH = 4;
-        constexpr size_t MAX_NODES = 900;
-        constexpr size_t MAX_OWNER_HITS = 64;
-        constexpr size_t MAX_POINTER_LOG = 160;
-
-        struct Node
-        {
-            std::uintptr_t address = 0;
-            int depth = 0;
-            int parent = -1;
-            std::uintptr_t viaOffset = 0;
-        };
-
-        struct OwnerHit
-        {
-            std::uintptr_t owner = 0;
-            std::uint32_t signature = 0;
-            Tuning tuning{};
-            std::array<std::int32_t, 6> midi{};
-            int nodeIndex = -1;
-        };
-
-        struct PointerLog
-        {
-            std::uintptr_t source = 0;
-            std::uintptr_t offset = 0;
-            std::uintptr_t target = 0;
-            int depth = 0;
-        };
-
-        auto readablePrivatePointer =
-            [](std::uintptr_t address) -> bool
-            {
-                if (!address)
-                    return false;
-
-                MEMORY_BASIC_INFORMATION mbi{};
-                if (!VirtualQuery(
-                        reinterpret_cast<const void*>(address),
-                        &mbi,
-                        sizeof(mbi)))
-                {
-                    return false;
-                }
-
-                if (mbi.State != MEM_COMMIT ||
-                    (mbi.Protect & PAGE_GUARD) ||
-                    (mbi.Protect & PAGE_NOACCESS) ||
-                    mbi.Type != MEM_PRIVATE)
-                {
-                    return false;
-                }
-
-                const DWORD readable =
-                    PAGE_READONLY |
-                    PAGE_READWRITE |
-                    PAGE_WRITECOPY |
-                    PAGE_EXECUTE_READ |
-                    PAGE_EXECUTE_READWRITE |
-                    PAGE_EXECUTE_WRITECOPY;
-
-                return (mbi.Protect & readable) != 0;
-            };
-
-        HMODULE gameModule =
-            GetModuleHandleW(nullptr);
-
-        const std::uintptr_t gameBase =
-            reinterpret_cast<std::uintptr_t>(gameModule);
-
-        auto signatureIsGameImage =
-            [gameBase](std::uint32_t signature) -> bool
-            {
-                if (!signature || !gameBase)
-                    return false;
-
-                MEMORY_BASIC_INFORMATION mbi{};
-                if (!VirtualQuery(
-                        reinterpret_cast<const void*>(
-                            static_cast<std::uintptr_t>(signature)),
-                        &mbi,
-                        sizeof(mbi)))
-                {
-                    return false;
-                }
-
-                return
-                    mbi.State == MEM_COMMIT &&
-                    mbi.Type == MEM_IMAGE &&
-                    reinterpret_cast<std::uintptr_t>(
-                        mbi.AllocationBase) == gameBase;
-            };
-
-        std::uintptr_t rootSlot = 0;
-        std::uintptr_t rootObject = 0;
-        std::uintptr_t stage1 = 0;
-        std::uintptr_t stage2 = 0;
-        std::uintptr_t container = 0;
-
-        if (gameModule)
-        {
-            const std::uintptr_t rootOffset =
-                GetExecutableVersion() ==
-                    ExecutableVersion::LearnAndPlay2024
-                ? TUNER_TEXT_2024_ROOT_OFFSET
-                : TUNER_TEXT_2022_ROOT;
-
-            rootSlot = gameBase + rootOffset;
-
-            if (!SafeReadProcessValue(
-                    rootSlot,
-                    rootObject) ||
-                !rootObject ||
-                !SafeReadProcessValue(
-                    rootObject + MP_ROOT_TO_STAGE1,
-                    stage1) ||
-                !stage1 ||
-                !SafeReadProcessValue(
-                    stage1 + MP_STAGE1_TO_STAGE2,
-                    stage2) ||
-                !stage2 ||
-                !SafeReadProcessValue(
-                    stage2 + MP_STAGE2_TO_PAIR,
-                    container))
-            {
-                container = 0;
-            }
-        }
-
-        std::vector<Node> nodes;
-        std::unordered_set<std::uintptr_t> visited;
-        std::vector<OwnerHit> ownerHits;
-        std::vector<PointerLog> pointerLog;
-
-        if (container &&
-            readablePrivatePointer(container))
-        {
-            nodes.push_back(
-                { container, 0, -1, 0 });
-            visited.insert(container);
-        }
-
-        for (size_t cursor = 0;
-             cursor < nodes.size() &&
-             cursor < MAX_NODES;
-             ++cursor)
-        {
-            const Node node = nodes[cursor];
-
-            std::uint32_t signature = 0;
-            Tuning tuning{};
-            std::array<std::int32_t, 6> midi{};
-
-            if (SafeReadProcessValue(
-                    node.address,
-                    signature) &&
-                signatureIsGameImage(signature) &&
-                ReadDirectOwnerTuning(
-                    node.address,
-                    tuning,
-                    &midi))
-            {
-                bool duplicate = false;
-                for (const auto& hit : ownerHits)
-                {
-                    if (hit.owner == node.address)
-                    {
-                        duplicate = true;
-                        break;
-                    }
-                }
-
-                if (!duplicate &&
-                    ownerHits.size() < MAX_OWNER_HITS)
-                {
-                    ownerHits.push_back(
-                        {
-                            node.address,
-                            signature,
-                            tuning,
-                            midi,
-                            static_cast<int>(cursor)
-                        });
-                }
-            }
-
-            if (node.depth >= MAX_DEPTH)
-                continue;
-
-            for (std::uintptr_t offset = 0;
-                 offset < OBJECT_SCAN_BYTES;
-                 offset += sizeof(std::uint32_t))
-            {
-                std::uint32_t raw = 0;
-                if (!SafeReadProcessValue(
-                        node.address + offset,
-                        raw))
-                {
-                    continue;
-                }
-
-                const std::uintptr_t target =
-                    static_cast<std::uintptr_t>(raw);
-
-                if (!target ||
-                    target == node.address ||
-                    !readablePrivatePointer(target))
-                {
-                    continue;
-                }
-
-                if (pointerLog.size() < MAX_POINTER_LOG)
-                {
-                    pointerLog.push_back(
-                        {
-                            node.address,
-                            offset,
-                            target,
-                            node.depth
-                        });
-                }
-
-                if (visited.insert(target).second &&
-                    nodes.size() < MAX_NODES)
-                {
-                    nodes.push_back(
-                        {
-                            target,
-                            node.depth + 1,
-                            static_cast<int>(cursor),
-                            offset
-                        });
-                }
-            }
-        }
-
-        auto appendPath =
-            [&nodes](
-                std::ostringstream& log,
-                int nodeIndex)
-            {
-                if (nodeIndex < 0 ||
-                    static_cast<size_t>(nodeIndex) >=
-                        nodes.size())
-                {
-                    log << "<unavailable>";
-                    return;
-                }
-
-                std::vector<int> chain;
-                int current = nodeIndex;
-
-                while (current >= 0 &&
-                       static_cast<size_t>(current) <
-                           nodes.size())
-                {
-                    chain.push_back(current);
-                    current = nodes[current].parent;
-                }
-
-                std::reverse(
-                    chain.begin(),
-                    chain.end());
-
-                if (chain.empty())
-                {
-                    log << "<empty>";
-                    return;
-                }
-
-                log << AddressText(
-                    nodes[chain[0]].address);
-
-                for (size_t i = 1;
-                     i < chain.size();
-                     ++i)
-                {
-                    log << " +0x"
-                        << std::uppercase
-                        << std::hex
-                        << nodes[chain[i]].viaOffset
-                        << std::dec
-                        << " -> "
-                        << AddressText(
-                            nodes[chain[i]].address);
-                }
-            };
-
-        std::ostringstream log;
-
-        log << "============================================================\n";
-        log << "RL-Mods single-player tuner leaf locator\n";
-        log << "BUILD: SP_TARGET_V7_FOCUSED_LEAF\n";
-
-        SYSTEMTIME now{};
-        GetLocalTime(&now);
-
-        log << std::setfill('0')
-            << std::setw(4) << now.wYear << "-"
-            << std::setw(2) << now.wMonth << "-"
-            << std::setw(2) << now.wDay << " "
-            << std::setw(2) << now.wHour << ":"
-            << std::setw(2) << now.wMinute << ":"
-            << std::setw(2) << now.wSecond << "\n";
-
-        log << "Current menu: "
-            << CurrentMenu() << "\n";
-        log << "Builder hook: DISABLED\n";
-        log << "Process-wide scans: NONE\n";
-        log << "Search scope: shared +0x94 container, 0x300 bytes/object, depth 4\n";
-        log << "Owner validation: game-image signature + MIDI/offset relationship\n\n";
-
-        log << "SHARED SPINE\n";
-        log << "  root slot:   "
-            << AddressText(rootSlot) << "\n";
-        log << "  root object: "
-            << AddressText(rootObject) << "\n";
-        log << "  root+0x10:   "
-            << AddressText(stage1) << "\n";
-        log << "  +0xD0:       "
-            << AddressText(stage2) << "\n";
-        log << "  +0x94:       "
-            << AddressText(container)
-            << "  <SP leaf search root>\n\n";
-
-        log << "FOCUSED GRAPH\n";
-        log << "  nodes visited: "
-            << nodes.size() << " / "
-            << MAX_NODES << "\n";
-        log << "  validated tuning owners: "
-            << ownerHits.size() << "\n\n";
-
-        if (!ownerHits.empty())
-        {
-            log << "VALIDATED OWNER HITS\n";
-
-            for (size_t h = 0;
-                 h < ownerHits.size();
-                 ++h)
-            {
-                const auto& hit = ownerHits[h];
-
-                log << "  HIT " << (h + 1)
-                    << " owner="
-                    << AddressText(hit.owner)
-                    << " signature="
-                    << AddressText(hit.signature)
-                    << " target="
-                    << VectorText(hit.tuning)
-                    << " / " << Name(hit.tuning)
-                    << "\n";
-
-                log << "    MIDI: [";
-                for (size_t i = 0;
-                     i < hit.midi.size();
-                     ++i)
-                {
-                    if (i) log << ",";
-                    log << hit.midi[i];
-                }
-                log << "]\n";
-
-                log << "    PATH: ";
-                appendPath(log, hit.nodeIndex);
-                log << "\n";
-                log << "    leaf target field: owner +0x50\n";
-            }
-
-            log << "\n";
-        }
-
-        log << "EARLY POINTERS FROM FOCUSED WALK\n";
-        log << "  count logged: "
-            << pointerLog.size() << "\n";
-
-        for (size_t i = 0;
-             i < pointerLog.size();
-             ++i)
-        {
-            const auto& p = pointerLog[i];
-            log << "  depth " << p.depth
-                << " " << AddressText(p.source)
-                << " +0x"
-                << std::uppercase
-                << std::hex
-                << p.offset
-                << std::dec
-                << " -> "
-                << AddressText(p.target)
-                << "\n";
-        }
-
-        log << "\nRESULT\n";
-
-        if (ownerHits.empty())
-        {
-            log << "  no validated SP tuning owner found within focused depth\n";
-            log << "  next step: widen only this container graph, not the process\n";
-        }
-        else
-        {
-            log << "  candidate SP leaf path(s) found: "
-                << ownerHits.size() << "\n";
-            log << "  compare against visible custom tuning before production use\n";
-        }
-
-        int referenceHz = 0;
-        if (TryReadReferenceHz(referenceHz))
-            log << "  reference: A" << referenceHz << "\n";
-        else
-            log << "  reference: unavailable\n";
-
-        log << "============================================================\n\n";
-
-        const std::wstring path =
-            BuildGamePath(L"RLMods_tuning_debug.txt");
-
-        FILE* file = nullptr;
-        if (_wfopen_s(
-                &file,
-                path.c_str(),
-                L"a, ccs=UTF-8") != 0 ||
-            !file)
-        {
-            return false;
-        }
-
-        const std::string text = log.str();
-        std::fwprintf(file, L"%hs", text.c_str());
-        std::fclose(file);
-        return true;
     }
 
     bool TryReadArrangement(

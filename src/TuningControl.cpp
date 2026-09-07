@@ -34,6 +34,10 @@ namespace TuningControl
         constexpr ULONGLONG AUTO_READ_INTERVAL_MS = 100;
         constexpr ULONGLONG AUTO_CANCEL_GRACE_MS = 3000;
 
+        constexpr int DEFAULT_OSD_DURATION_MS = 2200;
+        constexpr int MIN_OSD_DURATION_MS = 500;
+        constexpr int MAX_OSD_DURATION_MS = 60000;
+
         // RSMods-verified Rocksmith multiplayer state.
         constexpr std::uintptr_t MULTIPLAYER_2022_ROOT_OFFSET =
             0x00F5F57C;
@@ -103,7 +107,7 @@ namespace TuningControl
         };
 
         PlayerState g_players[MAX_PLAYERS];
-        ControlMode g_mode = ControlMode::Sync;
+        ControlMode g_mode = ControlMode::Auto;
 
         AsioPassthrough::Status g_lastAsioStatus =
             AsioPassthrough::Status::NotInstalled;
@@ -111,6 +115,7 @@ namespace TuningControl
         HWND g_overlay = nullptr;
         HFONT g_font = nullptr;
         ULONGLONG g_hideAt = 0;
+        int g_osdDurationMs = DEFAULT_OSD_DURATION_MS;
 
         AutoTunerSession g_autoSession{};
         ULONGLONG g_nextAutoReadAt = 0;
@@ -221,6 +226,25 @@ namespace TuningControl
                     0,
                     slash + 1) +
                 L"RLMods.ini";
+        }
+
+        int ReadOsdDurationMs()
+        {
+            const std::wstring iniPath =
+                BuildIniPath();
+
+            const int value =
+                GetPrivateProfileIntW(
+                    L"OSD",
+                    L"DurationMs",
+                    DEFAULT_OSD_DURATION_MS,
+                    iniPath.c_str());
+
+            return
+                std::clamp(
+                    value,
+                    MIN_OSD_DURATION_MS,
+                    MAX_OSD_DURATION_MS);
         }
 
         bool Is2024Executable()
@@ -1452,7 +1476,8 @@ namespace TuningControl
             return true;
         }
 
-        void ShowOverlay()
+        void RefreshOverlay(
+            bool resetHideTimer)
         {
             if (!g_overlay)
                 return;
@@ -1475,17 +1500,31 @@ namespace TuningControl
                 SWP_NOACTIVATE |
                 SWP_SHOWWINDOW);
 
-            g_hideAt =
-                GetTickCount64() +
-                2200;
+            if (resetHideTimer)
+            {
+                g_hideAt =
+                    GetTickCount64() +
+                    static_cast<ULONGLONG>(
+                        g_osdDurationMs);
+            }
+        }
+
+        void ShowOverlay()
+        {
+            RefreshOverlay(true);
         }
     }
 
     bool Initialize()
     {
-        RocksmithTuning::InitializeTunerTargetCapture();
+        g_osdDurationMs =
+            ReadOsdDurationMs();
 
-        ApplyAllManual();
+        if (g_mode == ControlMode::Auto)
+            ResetAutoState();
+        else
+            ApplyAllManual();
+
         CreateOverlay();
 
         g_lastAsioStatus =
@@ -1504,9 +1543,6 @@ namespace TuningControl
             CycleMode();
             showOverlay = true;
         }
-
-        // F10 is intentionally unassigned. Auto confirmation now comes from
-        // successfully leaving a Rocksmith pre-song tuner into *_Game.
 
         if (KeyPressed(
                 KEY_SHIFT_DOWN))
@@ -1570,7 +1606,9 @@ namespace TuningControl
                 IsWindowVisible(
                     g_overlay))
             {
-                showOverlay = true;
+                // Redraw the shorter text after a notice expires without
+                // extending the configured OSD hold time.
+                RefreshOverlay(false);
             }
         }
 
@@ -1593,8 +1631,6 @@ namespace TuningControl
 
     void Shutdown()
     {
-        RocksmithTuning::ShutdownTunerTargetCapture();
-
         if (g_overlay)
         {
             DestroyWindow(g_overlay);
