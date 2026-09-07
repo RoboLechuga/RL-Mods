@@ -19,6 +19,7 @@ namespace Audio
 
         void SetSemitones(int semitones);
         void SetTuning(int semitones, int referenceHz);
+        void SetRatio(float ratio);
 
         bool IsNeutral() const;
 

@@ -52,6 +52,7 @@
   <ClCompile Include="main.cpp" />
   <ClCompile Include="AsioPassthrough.cpp" />
   <ClCompile Include="RealtimePitchShifter.cpp" />
+  <ClCompile Include="RocksmithTuning.cpp" />
   <ClCompile Include="TuningControl.cpp" />
   <ClCompile Include="ScreenshotControl.cpp" />
 </ItemGroup>
@@ -61,6 +62,7 @@
   <ClInclude Include="CaptureFormat.h" />
   <ClInclude Include="IInputProcessor.hpp" />
   <ClInclude Include="RealtimePitchShifter.hpp" />
+  <ClInclude Include="RocksmithTuning.hpp" />
   <ClInclude Include="TuningControl.hpp" />
   <ClInclude Include="ScreenshotControl.hpp" />
 </ItemGroup>
