@@ -20,7 +20,7 @@ namespace TuningControl
         constexpr int MAX_PLAYERS = 2;
 
         constexpr int MIN_SHIFT = -12;
-        constexpr int MAX_SHIFT = 0;
+        constexpr int MAX_SHIFT = +12;
         constexpr int MIN_REFERENCE_HZ = 420;
         constexpr int MAX_REFERENCE_HZ = 461;
         constexpr int DEFAULT_REFERENCE_HZ = 440;
