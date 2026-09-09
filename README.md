@@ -1,85 +1,6 @@
-# RL-Mods v1.4 Test Build
+# RL-Mods v1.4
 
 A lightweight Rocksmith 2014 Remastered mod focused on practical quality-of-life features without the large hook/protection layer used by broader mod suites.
-
-> **Pre-release test build**
->
-> The new v1.4 tuning work is being distributed for group testing and feedback before release.
->
-> - Bidirectional pitch shifting has passed limited initial testing.
-> - F10 physical guitar Setup Mode has passed limited initial testing.
-> - Setup exit / immediate Auto recalculation has passed initial testing.
-> - Multiplayer behavior and persistence across restarts are still being actively tested.
-
-## What's New in v1.4
-
-### Runtime Physical Guitar Setup
-
-RL-Mods can now be told what tuning the guitar in your hands is actually in without leaving Rocksmith or editing an INI file.
-
-Press `F10` to enter Setup Mode. The tuning OSD stays visible while Setup Mode is active.
-
-- `,` / `.` — lower / raise Player 1 physical guitar tuning by one semitone
-- `;` / `'` — lower / raise Player 2 physical guitar tuning by one semitone
-- `F10` — exit Setup Mode and return to the previous tuning mode
-
-Setup Mode selects standard whole-guitar tunings. Player 1 and Player 2 are independent.
-
-The current audio shift is left untouched while Setup Mode is active.
-
-### Bidirectional Auto Tuning
-
-Auto tuning can now shift upward as well as downward.
-
-This allows a guitar that is physically tuned below E Standard to play higher-tuned songs without retuning the whole guitar first.
-
-Examples:
-
-- Guitar in Eb Standard → E Standard song: virtual shift `+1`
-- Guitar in D Standard → E Standard song: virtual shift `+2`
-- Guitar in Eb Standard → D Standard song: virtual shift `-1`
-- Guitar in E Standard → D Standard song: virtual shift `-2`
-
-For non-uniform tunings such as Drop tunings, RL-Mods chooses the global virtual shift that minimizes the physical retuning required.
-
-Examples:
-
-- Guitar in Eb Standard → Drop D song: virtual shift `+1`; only the low string needs to move physically
-- Guitar in Drop D → E Standard song: virtual shift `0`; only the low string needs to return to E
-- Guitar in Eb Standard → Eb Drop Db song: virtual shift `0`; only the low string needs to move physically
-
-### Persistent Physical Guitar Baselines
-
-The physical tuning selected in Setup Mode is saved to `RLMods.ini` when Setup Mode is exited.
-
-```ini
-[Tuning]
-Player1Physical=-1
-Player2Physical=-2
-```
-
-The values are semitone offsets from E Standard (`0` = E, `-1` = Eb, `-2` = D). If no saved value exists, RL-Mods defaults that player to E Standard.
-
-The saved value is the guitar's declared baseline — the tuning you expect that guitar to still be in when you return to Rocksmith. Temporary string-specific retuning inferred during normal Auto operation does not overwrite the saved baseline.
-
-This means a guitar that normally lives in Eb, D, or another standard tuning is ready on the next launch without visiting Setup Mode again.
-
-### Setup Exit Auto Recalculation
-
-When Setup Mode is entered while Auto has a valid current target, RL-Mods snapshots that target.
-
-When Setup Mode is exited, Auto recalculates immediately against the newly declared physical guitar tuning.
-
-That means a guitar can be changed without restarting Rocksmith or waiting for another song:
-
-1. Playing an E Standard song with an E Standard guitar
-2. Press `F10`
-3. Swap to a guitar in Eb Standard
-4. Set Player 1 physical tuning to Eb
-5. Press `F10`
-6. RL-Mods applies `+1` immediately so Rocksmith still receives E Standard
-
-If the new physical tuning still requires string-specific physical retuning, RL-Mods reports that instead of pretending the guitar was retuned.
 
 ## Features
 
@@ -89,10 +10,9 @@ If the new physical tuning still requires string-specific physical retuning, RL-
 - Alternate tuning reference from A420 through A461
 - Automatic song tuning from Rocksmith's pre-song tuner
 - Runtime physical guitar tuning setup with F10
-- Persistent Player 1 / Player 2 physical guitar baselines in `RLMods.ini`
 - Physical-aware bidirectional Auto tuning
 - Immediate Auto recalculation after changing physical guitar setup
-- Independent Player 1 / Player 2 physical tuning state
+- Persistent Player 1 / Player 2 physical guitar baselines
 - True dry bypass at neutral pitch / A440
 - Single-player and two-player tuning OSD
 - ASIO readiness and error reporting
@@ -138,6 +58,14 @@ Debug=0
 
 Use `Version=2022` for the September 2022 Remastered executable or `Version=2024` for the Learn & Play memory layout.
 
+`Player1Physical` and `Player2Physical` are semitone offsets from E Standard:
+
+- `0` = E Standard
+- `-1` = Eb Standard
+- `-2` = D Standard
+
+If the tuning values are omitted, RL-Mods defaults to E Standard.
+
 ## Controls
 
 ### Normal Tuning Mode
@@ -163,13 +91,7 @@ Use `Version=2022` for the September 2022 Remastered executable or `Version=2024
 - `;` — Player 2 physical tuning down one semitone
 - `'` — Player 2 physical tuning up one semitone
 
-While Setup Mode is active:
-
-- the tuning OSD remains visible
-- Auto polling is paused
-- the current virtual audio shift remains active
-- F9 tuning-mode changes are ignored
-- reference controls are temporarily repurposed for Player 2 physical tuning
+While Setup Mode is active, the tuning OSD stays visible and the current audio shift remains unchanged.
 
 RL-Mods hotkeys only act while Rocksmith owns the foreground window. Key presses made while another application has focus are discarded rather than queued for later.
 
@@ -189,13 +111,22 @@ Auto is the default tuning mode. Press `F9` to cycle into the manual Player 1 / 
 
 Auto uses Rocksmith's pre-song tuner as the authority. The primary reader uses Rocksmith's six-string tuner target object directly, including custom tunings; the legacy single-player tuner text path is retained only as a compatibility fallback.
 
-When a pre-song tuner appears, RL-Mods reads the target tuning and compares it to the physical guitar tuning currently known for that player.
+RL-Mods compares the song target to the physical guitar tuning currently known for that player and chooses a global virtual pitch shift that minimizes physical retuning.
 
-RL-Mods evaluates the available global virtual shifts and prefers the choice that:
+The selection favors:
 
-1. requires physical retuning on the fewest strings
-2. requires the least total physical semitone movement
-3. uses the smallest virtual pitch shift when otherwise tied
+1. the fewest strings requiring physical retuning
+2. the least total physical semitone movement
+3. the smallest virtual pitch shift when otherwise tied
+
+Examples:
+
+- Guitar in E Standard → D Standard song: virtual shift `-2`
+- Guitar in Eb Standard → E Standard song: virtual shift `+1`
+- Guitar in Eb Standard → D Standard song: virtual shift `-1`
+- Guitar in Eb Standard → Drop D song: virtual shift `+1`; only the low string needs to move physically
+- Guitar in Drop D → E Standard song: virtual shift `0`; only the low string needs to return to E
+- Guitar in Eb Standard → Eb Drop Db song: virtual shift `0`; only the low string needs to move physically
 
 Any remaining non-uniform string changes are performed physically in Rocksmith's tuner.
 
@@ -203,28 +134,30 @@ When the tuner successfully advances into gameplay, the shift is latched for the
 
 This also supports Nonstop Play: if Rocksmith presents another pre-song tuner, Auto processes the new target. If Rocksmith skips the tuner, RL-Mods leaves the current shift unchanged.
 
-## Physical Guitar State
+## Physical Guitar Setup
 
-RL-Mods keeps a physical tuning state for each player and stores the last declared Setup baseline in `RLMods.ini`.
+Press `F10` to tell RL-Mods what tuning the guitar in your hands is actually in.
 
-At startup, RL-Mods restores `Player1Physical` and `Player2Physical`. If either value is missing, that player defaults to E Standard.
+Setup Mode changes the declared standard tuning for Player 1 and Player 2 independently without leaving Rocksmith or editing the INI manually.
 
-Normally, Rocksmith's tuner can update RL-Mods' in-session understanding of the physical tuning after any required retuning. Those temporary Auto/tuner-derived changes do not overwrite the saved baseline.
+Use Setup Mode when:
 
-Use `F10` Setup Mode when:
-
-- using a guitar that is physically tuned differently from the saved baseline
+- starting with a guitar that is not in the saved tuning
 - swapping to a differently tuned guitar
 - manually changing the guitar tuning outside Rocksmith
 - correcting RL-Mods' current physical tuning assumption
 
-When Setup Mode is exited, the declared Player 1 and Player 2 physical tunings are saved for the next Rocksmith session.
+When Setup Mode is exited, the declared physical tuning is saved to `RLMods.ini` and becomes the starting baseline for the next Rocksmith session.
+
+Temporary string-specific retuning inferred during normal Auto operation does not overwrite the saved baseline.
+
+If Setup Mode is used while Auto already has a valid current song target, RL-Mods recalculates the required virtual shift when Setup Mode is exited.
 
 ## Tuning OSD
 
 The tuning OSD shows the active tuning mode, guitar tuning, effective target, pitch shift, and reference frequency.
 
-In Setup Mode it stays visible and shows the declared physical tuning for Player 1 and Player 2 along with the Setup controls.
+In Setup Mode, the OSD stays visible while physical guitar tuning is being changed.
 
 The normal OSD hold time is configurable in `RLMods.ini`:
 
@@ -250,39 +183,6 @@ Common errors:
 - `ASIO: duplicate input Channel` — both player inputs are configured to the same ASIO channel.
 
 RL-Mods matches `RS_ASIO.ini` `Channel=` directly to the driver's ASIO channel number.
-
-## v1.4 Testing
-
-This build needs real-world use more than synthetic testing.
-
-Please report:
-
-- physical guitar tuning used
-- song tuning
-- single-player or multiplayer
-- virtual shift RL-Mods selected
-- whether Rocksmith requested additional physical retuning
-- whether note detection behaved normally
-- any audible artifacts, especially when shifting upward
-- any incorrect OSD state
-- any Setup Mode behavior that did not match the guitar actually in hand
-
-Useful test cases include:
-
-- Eb guitar → E Standard song
-- D guitar → E Standard song
-- Eb guitar → D Standard song
-- Eb guitar → Drop D song
-- Drop D guitar → E Standard song
-- restart Rocksmith and confirm saved P1/P2 physical baselines are restored
-- changing guitars between songs
-- changing guitars during a song, then exiting Setup Mode
-- Player 1 and Player 2 using different physical tunings
-- multiplayer songs where Player 1 and Player 2 have different Rocksmith targets
-- Nonstop Play with and without the tuner appearing between songs
-- alternate reference tunings such as A432 / A445 to confirm existing behavior remains intact
-
-The goal of the test build is to find bad assumptions, not just crashes. If the selected shift is technically valid but makes you retune more strings than necessary, report it.
 
 ## Screenshot Settings
 
