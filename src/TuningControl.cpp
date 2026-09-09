@@ -411,6 +411,81 @@ namespace TuningControl
                     MAX_PHYSICAL_STANDARD_SHIFT);
         }
 
+        void LoadPhysicalBaselines()
+        {
+            const std::wstring iniPath =
+                BuildIniPath();
+
+            const wchar_t* keys[MAX_PLAYERS] =
+            {
+                L"Player1Physical",
+                L"Player2Physical"
+            };
+
+            RocksmithTuning::Tuning standard{};
+
+            for (int player = 0;
+                 player < MAX_PLAYERS;
+                 ++player)
+            {
+                const int savedShift =
+                    GetPrivateProfileIntW(
+                        L"Tuning",
+                        keys[player],
+                        0,
+                        iniPath.c_str());
+
+                const int shift =
+                    std::clamp(
+                        savedShift,
+                        MIN_PHYSICAL_STANDARD_SHIFT,
+                        MAX_PHYSICAL_STANDARD_SHIFT);
+
+                g_players[player].physical =
+                    RocksmithTuning::Shifted(
+                        standard,
+                        shift);
+
+                g_players[player]
+                    .physicalReferenceHz =
+                    DEFAULT_REFERENCE_HZ;
+            }
+        }
+
+        void SavePhysicalBaselines()
+        {
+            const std::wstring iniPath =
+                BuildIniPath();
+
+            const wchar_t* keys[MAX_PLAYERS] =
+            {
+                L"Player1Physical",
+                L"Player2Physical"
+            };
+
+            for (int player = 0;
+                 player < MAX_PLAYERS;
+                 ++player)
+            {
+                const int shift =
+                    PhysicalStandardShift(
+                        g_players[player].physical);
+
+                wchar_t value[16] = {};
+
+                swprintf_s(
+                    value,
+                    L"%d",
+                    shift);
+
+                WritePrivateProfileStringW(
+                    L"Tuning",
+                    keys[player],
+                    value,
+                    iniPath.c_str());
+            }
+        }
+
         void ChangePhysicalTuning(
             int player,
             int delta)
@@ -549,6 +624,11 @@ namespace TuningControl
                 g_hideAt = 0;
                 return;
             }
+
+            // Persist only the standard physical baselines explicitly
+            // declared through Setup. Auto/tuner-derived residual tunings do
+            // not rewrite these values.
+            SavePhysicalBaselines();
 
             g_setupMode = false;
 
@@ -1849,6 +1929,10 @@ namespace TuningControl
     {
         g_osdDurationMs =
             ReadOsdDurationMs();
+
+        // Restore the last physical guitar baselines declared in Setup.
+        // Missing values default to E Standard for backward compatibility.
+        LoadPhysicalBaselines();
 
         if (g_mode == ControlMode::Auto)
             ResetAutoState();
