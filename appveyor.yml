@@ -1,7 +1,7 @@
 branches:
   only:
     - develop
-    - feature/baseline
+    - feature/basetuning
 
 image: Visual Studio 2022
 configuration: Release
