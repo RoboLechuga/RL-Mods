@@ -108,9 +108,19 @@ namespace TuningControl
             ULONGLONG leftTunerAt = 0;
         };
 
+        struct SetupAutoPlayerSnapshot
+        {
+            bool targetValid = false;
+            RocksmithTuning::Tuning target{};
+            int referenceHz =
+                DEFAULT_REFERENCE_HZ;
+        };
+
         PlayerState g_players[MAX_PLAYERS];
         ControlMode g_mode = ControlMode::Auto;
         bool g_setupMode = false;
+        std::array<SetupAutoPlayerSnapshot, MAX_PLAYERS>
+            g_setupAutoSnapshot{};
 
         AsioPassthrough::Status g_lastAsioStatus =
             AsioPassthrough::Status::NotInstalled;
@@ -459,20 +469,96 @@ namespace TuningControl
             return text;
         }
 
+        void ApplySetupExitAutoTargets();
+
+        void CaptureSetupAutoTargets()
+        {
+            g_setupAutoSnapshot = {};
+
+            if (g_mode !=
+                ControlMode::Auto)
+            {
+                return;
+            }
+
+            const int playerCount =
+                g_autoSession.active
+                ? (g_autoSession.multiplayer
+                    ? MAX_PLAYERS
+                    : 1)
+                : (IsRocksmithMultiplayer()
+                    ? MAX_PLAYERS
+                    : 1);
+
+            for (int player = 0;
+                 player < playerCount;
+                 ++player)
+            {
+                auto& snapshot =
+                    g_setupAutoSnapshot[player];
+
+                if (g_autoSession.active)
+                {
+                    const auto& session =
+                        g_autoSession.players[player];
+
+                    if (session.targetValid)
+                    {
+                        snapshot.targetValid = true;
+                        snapshot.target =
+                            session.target;
+                        snapshot.referenceHz =
+                            session.referenceHz;
+                        continue;
+                    }
+                }
+
+                const auto& state =
+                    g_players[player];
+
+                if (state.autoWaiting ||
+                    state.autoTargetUnavailable ||
+                    state.retuneRequired)
+                {
+                    continue;
+                }
+
+                snapshot.targetValid = true;
+                snapshot.target =
+                    RocksmithTuning::Shifted(
+                        state.physical,
+                        state.displayShift);
+                snapshot.referenceHz =
+                    state.displayReferenceHz;
+            }
+        }
+
         void ToggleSetupMode()
         {
-            g_setupMode =
-                !g_setupMode;
-
             g_notice.clear();
             g_noticeUntil = 0;
 
-            if (g_setupMode)
+            if (!g_setupMode)
             {
+                CaptureSetupAutoTargets();
+
+                g_setupMode = true;
+
                 // Setup is a temporary control layer over the current tuning
                 // mode. Do not touch the active audio shift here.
                 g_hideAt = 0;
+                return;
             }
+
+            g_setupMode = false;
+
+            if (g_mode ==
+                ControlMode::Auto)
+            {
+                ApplySetupExitAutoTargets();
+            }
+
+            g_setupAutoSnapshot = {};
         }
 
         float RatioForRelativeTarget(
@@ -1062,6 +1148,92 @@ namespace TuningControl
             notice += std::to_string(shift);
 
             SetNotice(notice);
+        }
+
+        void ApplySetupExitAutoTargets()
+        {
+            const int playerCount =
+                g_autoSession.active
+                ? (g_autoSession.multiplayer
+                    ? MAX_PLAYERS
+                    : 1)
+                : (IsRocksmithMultiplayer()
+                    ? MAX_PLAYERS
+                    : 1);
+
+            bool adjusted = false;
+            bool retuneRequired = false;
+
+            for (int player = 0;
+                 player < playerCount;
+                 ++player)
+            {
+                const auto& snapshot =
+                    g_setupAutoSnapshot[player];
+
+                if (!snapshot.targetValid)
+                    continue;
+
+                auto& state =
+                    g_players[player];
+
+                if (g_autoSession.active)
+                {
+                    // If Setup was entered while Rocksmith's tuner was active,
+                    // make the newly declared physical guitar the session
+                    // baseline and let the normal tuner path handle any
+                    // residual per-string retune.
+                    g_autoSession.players[player]
+                        .previousPlayer =
+                        state;
+
+                    ApplyAutoTunerTarget(
+                        player,
+                        snapshot.target,
+                        snapshot.referenceHz);
+
+                    adjusted = true;
+                    continue;
+                }
+
+                const int shift =
+                    ChooseAutoShift(
+                        state.physical,
+                        snapshot.target);
+
+                const RocksmithTuning::Tuning requiredPhysical =
+                    RocksmithTuning::Shifted(
+                        snapshot.target,
+                        -shift);
+
+                ClearAutoFlags(player);
+
+                // Outside the tuner we cannot pretend the player performed a
+                // residual physical retune. Keep the physical tuning they just
+                // declared, apply the best global shift immediately, and flag
+                // any remaining string-specific retune requirement.
+                state.retuneRequired =
+                    requiredPhysical !=
+                    state.physical;
+
+                if (state.retuneRequired)
+                    retuneRequired = true;
+
+                ApplyPlayerTarget(
+                    player,
+                    shift,
+                    snapshot.referenceHz);
+
+                adjusted = true;
+            }
+
+            if (!adjusted)
+                return;
+
+            SetNotice(
+                retuneRequired
+                ? "Setup applied; Auto recalculated - physical retune still required"
+                : "Setup applied; Auto recalculated");
         }
 
         void CommitAutoTunerSession()
