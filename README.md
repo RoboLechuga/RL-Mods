@@ -5,7 +5,7 @@ A lightweight Rocksmith 2014 Remastered mod focused on practical quality-of-life
 ## Features
 
 - F8 song re-enumeration without restarting Rocksmith
-- Real-time ASIO pitch shifting (includes support for Int32LSB and Float32LSB ASIO formats)
+- Real-time ASIO pitch shifting (includes support for Int32LSB and Float32LSB ASIO sample formats)
 - Manual pitch shifting down or up
 - Alternate tuning reference from A420 through A461
 - Automatic song tuning from Rocksmith's pre-song tuner
