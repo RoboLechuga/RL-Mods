@@ -175,11 +175,14 @@ ASIO setup failures are reported instead of silently accepting tuning commands t
 `ASIO: waiting for audio` is a normal transient startup state.
 
 Common errors:
+RL-Mods supports Int32LSB and Float32LSB ASIO input formats. Either may be used; there is no required preference between them.
+If the ASIO driver exposes another format, RL-Mods reports the detected format when possible, for example:
+ASIO: unsupported input format Int24LSB (17)
 
 - `ASIO hook failed` — RL-Mods could not install its RS_ASIO interception.
 - `ASIO: buffer setup failed` — the ASIO driver failed while creating or recreating its buffers.
 - `ASIO: no input channel bound` — check the `Channel=` value in the relevant `[Asio.Input.N]` section of `RS_ASIO.ini`.
-- `ASIO: unsupported input format` — the bound input is not using a supported ASIO sample format.
+- `ASIO: unsupported input format` ... — the bound input is not using `Int32LSB` or `Float32LSB`; the reported format/type is included when available.
 - `ASIO: duplicate input Channel` — both player inputs are configured to the same ASIO channel.
 
 RL-Mods matches `RS_ASIO.ini` `Channel=` directly to the driver's ASIO channel number.
