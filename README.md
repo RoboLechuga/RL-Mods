@@ -179,7 +179,7 @@ Common errors:
 - `ASIO hook failed` — RL-Mods could not install its RS_ASIO interception.
 - `ASIO: buffer setup failed` — the ASIO driver failed while creating or recreating its buffers.
 - `ASIO: no input channel bound` — check the `Channel=` value in the relevant `[Asio.Input.N]` section of `RS_ASIO.ini`.
-- `ASIO: unsupported input format` — the bound input is not using the supported 32-bit integer ASIO sample format.
+- `ASIO: unsupported input format` — the bound input is not using a supported ASIO sample format.
 - `ASIO: duplicate input Channel` — both player inputs are configured to the same ASIO channel.
 
 RL-Mods matches `RS_ASIO.ini` `Channel=` directly to the driver's ASIO channel number.
