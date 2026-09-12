@@ -20,7 +20,9 @@ namespace TuningControl
         constexpr int MAX_PLAYERS = 2;
 
         constexpr int MIN_SHIFT = -12;
-        constexpr int MAX_SHIFT = 0;
+        constexpr int MAX_SHIFT = +12;
+        constexpr int MIN_PHYSICAL_STANDARD_SHIFT = -12;
+        constexpr int MAX_PHYSICAL_STANDARD_SHIFT = 0;
         constexpr int MIN_REFERENCE_HZ = 420;
         constexpr int MAX_REFERENCE_HZ = 461;
         constexpr int DEFAULT_REFERENCE_HZ = 440;
@@ -106,8 +108,19 @@ namespace TuningControl
             ULONGLONG leftTunerAt = 0;
         };
 
+        struct SetupAutoPlayerSnapshot
+        {
+            bool targetValid = false;
+            RocksmithTuning::Tuning target{};
+            int referenceHz =
+                DEFAULT_REFERENCE_HZ;
+        };
+
         PlayerState g_players[MAX_PLAYERS];
         ControlMode g_mode = ControlMode::Auto;
+        bool g_setupMode = false;
+        std::array<SetupAutoPlayerSnapshot, MAX_PLAYERS>
+            g_setupAutoSnapshot{};
 
         AsioPassthrough::Status g_lastAsioStatus =
             AsioPassthrough::Status::NotInstalled;
@@ -366,6 +379,268 @@ namespace TuningControl
                 .autoTargetUnavailable = false;
         }
 
+        int PhysicalStandardShift(
+            const RocksmithTuning::Tuning& tuning)
+        {
+            bool standard = true;
+
+            for (size_t i = 1;
+                 i < tuning.strings.size();
+                 ++i)
+            {
+                if (tuning.strings[i] !=
+                    tuning.strings[0])
+                {
+                    standard = false;
+                    break;
+                }
+            }
+
+            // Setup mode intentionally selects standard tunings only.
+            // If the currently remembered physical tuning is Drop/Custom,
+            // use the upper-string family as the starting standard tuning.
+            const int shift =
+                standard
+                ? tuning.strings[0]
+                : tuning.strings[1];
+
+            return
+                std::clamp(
+                    shift,
+                    MIN_PHYSICAL_STANDARD_SHIFT,
+                    MAX_PHYSICAL_STANDARD_SHIFT);
+        }
+
+        void LoadPhysicalBaselines()
+        {
+            const std::wstring iniPath =
+                BuildIniPath();
+
+            const wchar_t* keys[MAX_PLAYERS] =
+            {
+                L"Player1Physical",
+                L"Player2Physical"
+            };
+
+            RocksmithTuning::Tuning standard{};
+
+            for (int player = 0;
+                 player < MAX_PLAYERS;
+                 ++player)
+            {
+                const int savedShift =
+                    GetPrivateProfileIntW(
+                        L"Tuning",
+                        keys[player],
+                        0,
+                        iniPath.c_str());
+
+                const int shift =
+                    std::clamp(
+                        savedShift,
+                        MIN_PHYSICAL_STANDARD_SHIFT,
+                        MAX_PHYSICAL_STANDARD_SHIFT);
+
+                g_players[player].physical =
+                    RocksmithTuning::Shifted(
+                        standard,
+                        shift);
+
+                g_players[player]
+                    .physicalReferenceHz =
+                    DEFAULT_REFERENCE_HZ;
+            }
+        }
+
+        void SavePhysicalBaselines()
+        {
+            const std::wstring iniPath =
+                BuildIniPath();
+
+            const wchar_t* keys[MAX_PLAYERS] =
+            {
+                L"Player1Physical",
+                L"Player2Physical"
+            };
+
+            for (int player = 0;
+                 player < MAX_PLAYERS;
+                 ++player)
+            {
+                const int shift =
+                    PhysicalStandardShift(
+                        g_players[player].physical);
+
+                wchar_t value[16] = {};
+
+                swprintf_s(
+                    value,
+                    L"%d",
+                    shift);
+
+                WritePrivateProfileStringW(
+                    L"Tuning",
+                    keys[player],
+                    value,
+                    iniPath.c_str());
+            }
+        }
+
+        void ChangePhysicalTuning(
+            int player,
+            int delta)
+        {
+            if (player < 0 ||
+                player >= MAX_PLAYERS)
+            {
+                return;
+            }
+
+            auto& state =
+                g_players[player];
+
+            const int current =
+                PhysicalStandardShift(
+                    state.physical);
+
+            const int next =
+                std::clamp(
+                    current + delta,
+                    MIN_PHYSICAL_STANDARD_SHIFT,
+                    MAX_PHYSICAL_STANDARD_SHIFT);
+
+            RocksmithTuning::Tuning standard{};
+
+            state.physical =
+                RocksmithTuning::Shifted(
+                    standard,
+                    next);
+        }
+
+        std::string SetupText()
+        {
+            std::string text =
+                "Mode: Setup\n"
+                "P1 Physical: ";
+
+            text +=
+                RocksmithTuning::Name(
+                    g_players[0].physical);
+
+            text +=
+                "\n, down    . up"
+                "\n\nP2 Physical: ";
+
+            text +=
+                RocksmithTuning::Name(
+                    g_players[1].physical);
+
+            text +=
+                "\n; down    ' up"
+                "\n\nAuto is paused; current audio shift stays active."
+                "\nF10  Return to ";
+
+            text += ModeName();
+            return text;
+        }
+
+        void ApplySetupExitAutoTargets();
+
+        void CaptureSetupAutoTargets()
+        {
+            g_setupAutoSnapshot = {};
+
+            if (g_mode !=
+                ControlMode::Auto)
+            {
+                return;
+            }
+
+            const int playerCount =
+                g_autoSession.active
+                ? (g_autoSession.multiplayer
+                    ? MAX_PLAYERS
+                    : 1)
+                : (IsRocksmithMultiplayer()
+                    ? MAX_PLAYERS
+                    : 1);
+
+            for (int player = 0;
+                 player < playerCount;
+                 ++player)
+            {
+                auto& snapshot =
+                    g_setupAutoSnapshot[player];
+
+                if (g_autoSession.active)
+                {
+                    const auto& session =
+                        g_autoSession.players[player];
+
+                    if (session.targetValid)
+                    {
+                        snapshot.targetValid = true;
+                        snapshot.target =
+                            session.target;
+                        snapshot.referenceHz =
+                            session.referenceHz;
+                        continue;
+                    }
+                }
+
+                const auto& state =
+                    g_players[player];
+
+                if (state.autoWaiting ||
+                    state.autoTargetUnavailable ||
+                    state.retuneRequired)
+                {
+                    continue;
+                }
+
+                snapshot.targetValid = true;
+                snapshot.target =
+                    RocksmithTuning::Shifted(
+                        state.physical,
+                        state.displayShift);
+                snapshot.referenceHz =
+                    state.displayReferenceHz;
+            }
+        }
+
+        void ToggleSetupMode()
+        {
+            g_notice.clear();
+            g_noticeUntil = 0;
+
+            if (!g_setupMode)
+            {
+                CaptureSetupAutoTargets();
+
+                g_setupMode = true;
+
+                // Setup is a temporary control layer over the current tuning
+                // mode. Do not touch the active audio shift here.
+                g_hideAt = 0;
+                return;
+            }
+
+            // Persist only the standard physical baselines explicitly
+            // declared through Setup. Auto/tuner-derived residual tunings do
+            // not rewrite these values.
+            SavePhysicalBaselines();
+
+            g_setupMode = false;
+
+            if (g_mode ==
+                ControlMode::Auto)
+            {
+                ApplySetupExitAutoTargets();
+            }
+
+            g_setupAutoSnapshot = {};
+        }
+
         float RatioForRelativeTarget(
             int semitones,
             int targetReferenceHz,
@@ -567,6 +842,9 @@ namespace TuningControl
 
         std::string CurrentText()
         {
+            if (g_setupMode)
+                return SetupText();
+
             const auto asioStatus =
                 AsioPassthrough::GetStatus();
 
@@ -779,32 +1057,69 @@ namespace TuningControl
         }
 
         int ChooseAutoShift(
+            const RocksmithTuning::Tuning& physical,
             const RocksmithTuning::Tuning& target)
         {
-            // Use the highest-pitched string in the target as the global shift.
-            // This mirrors the useful behavior of a drop pedal:
-            //   Eb Drop Db -> -1 globally, physical Drop D
-            //   D Standard  -> -2 globally, physical E Standard
-            //   Drop D/Open G -> 0 globally, physical retune only
-            int highest =
-                target.strings[0];
+            // Evaluate every legal global virtual shift and choose the one
+            // that requires the least physical retuning. Prefer fewer strings
+            // changed, then less total movement, then the smaller DSP shift.
+            // Exact +/- ties keep the downward shift because the scan runs
+            // from MIN_SHIFT to MAX_SHIFT.
+            int bestShift = 0;
+            int bestChangedStrings =
+                static_cast<int>(
+                    target.strings.size()) + 1;
+            int bestTotalMovement = 0;
+            int bestAbsoluteShift = 0;
 
-            for (size_t i = 1;
-                 i < target.strings.size();
-                 ++i)
+            for (int shift = MIN_SHIFT;
+                 shift <= MAX_SHIFT;
+                 ++shift)
             {
-                if (target.strings[i] > highest)
+                const RocksmithTuning::Tuning requiredPhysical =
+                    RocksmithTuning::Shifted(
+                        target,
+                        -shift);
+
+                int changedStrings = 0;
+                int totalMovement = 0;
+
+                for (size_t i = 0;
+                     i < target.strings.size();
+                     ++i)
                 {
-                    highest =
-                        target.strings[i];
+                    const int difference =
+                        requiredPhysical.strings[i] -
+                        physical.strings[i];
+
+                    if (difference != 0)
+                        ++changedStrings;
+
+                    totalMovement +=
+                        std::abs(difference);
                 }
+
+                const int absoluteShift =
+                    std::abs(shift);
+
+                const bool better =
+                    changedStrings < bestChangedStrings ||
+                    (changedStrings == bestChangedStrings &&
+                     totalMovement < bestTotalMovement) ||
+                    (changedStrings == bestChangedStrings &&
+                     totalMovement == bestTotalMovement &&
+                     absoluteShift < bestAbsoluteShift);
+
+                if (!better)
+                    continue;
+
+                bestShift = shift;
+                bestChangedStrings = changedStrings;
+                bestTotalMovement = totalMovement;
+                bestAbsoluteShift = absoluteShift;
             }
 
-            return
-                std::clamp(
-                    highest,
-                    MIN_SHIFT,
-                    MAX_SHIFT);
+            return bestShift;
         }
 
         int AutoPlayerCount()
@@ -860,16 +1175,18 @@ namespace TuningControl
                 return;
             }
 
+            auto& session =
+                g_autoSession.players[player];
+
             const int shift =
-                ChooseAutoShift(target);
+                ChooseAutoShift(
+                    session.previousPlayer.physical,
+                    target);
 
             const RocksmithTuning::Tuning requiredPhysical =
                 RocksmithTuning::Shifted(
                     target,
                     -shift);
-
-            auto& session =
-                g_autoSession.players[player];
 
             session.target = target;
             session.requiredPhysical =
@@ -911,6 +1228,92 @@ namespace TuningControl
             notice += std::to_string(shift);
 
             SetNotice(notice);
+        }
+
+        void ApplySetupExitAutoTargets()
+        {
+            const int playerCount =
+                g_autoSession.active
+                ? (g_autoSession.multiplayer
+                    ? MAX_PLAYERS
+                    : 1)
+                : (IsRocksmithMultiplayer()
+                    ? MAX_PLAYERS
+                    : 1);
+
+            bool adjusted = false;
+            bool retuneRequired = false;
+
+            for (int player = 0;
+                 player < playerCount;
+                 ++player)
+            {
+                const auto& snapshot =
+                    g_setupAutoSnapshot[player];
+
+                if (!snapshot.targetValid)
+                    continue;
+
+                auto& state =
+                    g_players[player];
+
+                if (g_autoSession.active)
+                {
+                    // If Setup was entered while Rocksmith's tuner was active,
+                    // make the newly declared physical guitar the session
+                    // baseline and let the normal tuner path handle any
+                    // residual per-string retune.
+                    g_autoSession.players[player]
+                        .previousPlayer =
+                        state;
+
+                    ApplyAutoTunerTarget(
+                        player,
+                        snapshot.target,
+                        snapshot.referenceHz);
+
+                    adjusted = true;
+                    continue;
+                }
+
+                const int shift =
+                    ChooseAutoShift(
+                        state.physical,
+                        snapshot.target);
+
+                const RocksmithTuning::Tuning requiredPhysical =
+                    RocksmithTuning::Shifted(
+                        snapshot.target,
+                        -shift);
+
+                ClearAutoFlags(player);
+
+                // Outside the tuner we cannot pretend the player performed a
+                // residual physical retune. Keep the physical tuning they just
+                // declared, apply the best global shift immediately, and flag
+                // any remaining string-specific retune requirement.
+                state.retuneRequired =
+                    requiredPhysical !=
+                    state.physical;
+
+                if (state.retuneRequired)
+                    retuneRequired = true;
+
+                ApplyPlayerTarget(
+                    player,
+                    shift,
+                    snapshot.referenceHz);
+
+                adjusted = true;
+            }
+
+            if (!adjusted)
+                return;
+
+            SetNotice(
+                retuneRequired
+                ? "Setup applied; Auto recalculated - physical retune still required"
+                : "Setup applied; Auto recalculated");
         }
 
         void CommitAutoTunerSession()
@@ -1511,6 +1914,13 @@ namespace TuningControl
 
         void ShowOverlay()
         {
+            if (g_setupMode)
+            {
+                g_hideAt = 0;
+                RefreshOverlay(false);
+                return;
+            }
+
             RefreshOverlay(true);
         }
     }
@@ -1519,6 +1929,10 @@ namespace TuningControl
     {
         g_osdDurationMs =
             ReadOsdDurationMs();
+
+        // Restore the last physical guitar baselines declared in Setup.
+        // Missing values default to E Standard for backward compatibility.
+        LoadPhysicalBaselines();
 
         if (g_mode == ControlMode::Auto)
             ResetAutoState();
@@ -1538,49 +1952,115 @@ namespace TuningControl
     {
         bool showOverlay = false;
 
-        if (KeyPressed(VK_F9))
+        const bool f9Pressed =
+            KeyPressed(VK_F9);
+
+        const bool f10Pressed =
+            KeyPressed(VK_F10);
+
+        const bool shiftDownPressed =
+            KeyPressed(
+                KEY_SHIFT_DOWN);
+
+        const bool shiftUpPressed =
+            KeyPressed(
+                KEY_SHIFT_UP);
+
+        const bool refDownPressed =
+            KeyPressed(
+                KEY_REF_DOWN);
+
+        const bool refUpPressed =
+            KeyPressed(
+                KEY_REF_UP);
+
+        const bool refResetPressed =
+            KeyPressed(
+                KEY_REF_RESET);
+
+        if (f10Pressed)
         {
-            CycleMode();
+            ToggleSetupMode();
             showOverlay = true;
         }
 
-        if (KeyPressed(
-                KEY_SHIFT_DOWN))
+        if (g_setupMode)
         {
-            ChangeShift(-1);
-            showOverlay = true;
-        }
+            // F9 and reference reset are deliberately consumed but ignored
+            // while Setup owns the tuning keys.
+            if (shiftDownPressed)
+            {
+                ChangePhysicalTuning(
+                    0,
+                    -1);
+                showOverlay = true;
+            }
 
-        if (KeyPressed(
-                KEY_SHIFT_UP))
+            if (shiftUpPressed)
+            {
+                ChangePhysicalTuning(
+                    0,
+                    1);
+                showOverlay = true;
+            }
+
+            if (refDownPressed)
+            {
+                ChangePhysicalTuning(
+                    1,
+                    -1);
+                showOverlay = true;
+            }
+
+            if (refUpPressed)
+            {
+                ChangePhysicalTuning(
+                    1,
+                    1);
+                showOverlay = true;
+            }
+        }
+        else
         {
-            ChangeShift(1);
-            showOverlay = true;
-        }
+            if (f9Pressed)
+            {
+                CycleMode();
+                showOverlay = true;
+            }
 
-        if (KeyPressed(
-                KEY_REF_DOWN))
-        {
-            ChangeReference(-1);
-            showOverlay = true;
-        }
+            if (shiftDownPressed)
+            {
+                ChangeShift(-1);
+                showOverlay = true;
+            }
 
-        if (KeyPressed(
-                KEY_REF_UP))
-        {
-            ChangeReference(1);
-            showOverlay = true;
-        }
+            if (shiftUpPressed)
+            {
+                ChangeShift(1);
+                showOverlay = true;
+            }
 
-        if (KeyPressed(
-                KEY_REF_RESET))
-        {
-            ResetReference();
-            showOverlay = true;
-        }
+            if (refDownPressed)
+            {
+                ChangeReference(-1);
+                showOverlay = true;
+            }
 
-        if (UpdateAuto())
-            showOverlay = true;
+            if (refUpPressed)
+            {
+                ChangeReference(1);
+                showOverlay = true;
+            }
+
+            if (refResetPressed)
+            {
+                ResetReference();
+                showOverlay = true;
+            }
+
+            if (UpdateAuto())
+                showOverlay = true;
+        }
 
         const auto asioStatus =
             AsioPassthrough::GetStatus();
@@ -1615,7 +2095,8 @@ namespace TuningControl
         if (showOverlay)
             ShowOverlay();
 
-        if (g_overlay &&
+        if (!g_setupMode &&
+            g_overlay &&
             IsWindowVisible(g_overlay) &&
             g_hideAt != 0 &&
             GetTickCount64() >=

@@ -22,11 +22,30 @@ namespace AsioPassthrough
         typedef double ASIOSampleRate;
 
         constexpr ASIOError ASE_OK = 0;
+
+        // Steinberg ASIOSampleType values used by RL-Mods.
         constexpr long ASIOSTInt32LSB = 18;
+        constexpr long ASIOSTFloat32LSB = 19;
+
+        // Known LSB sample types used only to make unsupported-format
+        // diagnostics useful when another driver turns up.
+        constexpr long ASIOSTInt16LSB = 16;
+        constexpr long ASIOSTInt24LSB = 17;
+        constexpr long ASIOSTFloat64LSB = 20;
+        constexpr long ASIOSTInt32LSB16 = 24;
+        constexpr long ASIOSTInt32LSB18 = 25;
+        constexpr long ASIOSTInt32LSB20 = 26;
+        constexpr long ASIOSTInt32LSB24 = 27;
+
         constexpr long MAX_ASIO_CHANNEL_NAME = 32;
         constexpr long MAX_BUFFER_FRAMES = 4096;
-        constexpr float INT32_TO_FLOAT = 1.0f / 2147483648.0f;
-        constexpr float FLOAT_TO_INT32 = 2147483647.0f;
+
+        constexpr float INT32_TO_FLOAT =
+            1.0f / 2147483648.0f;
+
+        constexpr float FLOAT_TO_INT32 =
+            2147483647.0f;
+
         constexpr int MAX_PLAYERS = 2;
 
         struct ASIOBufferInfo
@@ -53,23 +72,40 @@ namespace AsioPassthrough
             void (*bufferSwitch)(long, ASIOBool);
             void (*sampleRateDidChange)(ASIOSampleRate);
             long (*asioMessage)(long, long, void*, double*);
-            ASIOTime* (*bufferSwitchTimeInfo)(ASIOTime*, long, ASIOBool);
+            ASIOTime* (*bufferSwitchTimeInfo)(
+                ASIOTime*,
+                long,
+                ASIOBool);
         };
 
         typedef ASIOError(__fastcall* CreateBuffers_t)(
-            void*, void*, ASIOBufferInfo*, long, long, ASIOCallbacks*);
+            void*,
+            void*,
+            ASIOBufferInfo*,
+            long,
+            long,
+            ASIOCallbacks*);
 
         typedef ASIOError(__fastcall* GetChannelInfo_t)(
-            void*, void*, ASIOChannelInfo*);
+            void*,
+            void*,
+            ASIOChannelInfo*);
 
         typedef ASIOError(__fastcall* GetSampleRate_t)(
-            void*, void*, ASIOSampleRate*);
+            void*,
+            void*,
+            ASIOSampleRate*);
 
         typedef HRESULT(STDMETHODCALLTYPE* CreateInstance_t)(
-            IClassFactory*, IUnknown*, REFIID, void**);
+            IClassFactory*,
+            IUnknown*,
+            REFIID,
+            void**);
 
         typedef HRESULT(STDAPICALLTYPE* DllGetClassObject_t)(
-            REFCLSID, REFIID, LPVOID*);
+            REFCLSID,
+            REFIID,
+            LPVOID*);
 
         constexpr size_t SLOT_ASIO_GET_SAMPLE_RATE = 13;
         constexpr size_t SLOT_ASIO_GET_CHANNEL_INFO = 18;
@@ -105,19 +141,88 @@ namespace AsioPassthrough
         std::atomic<bool> playerReady[MAX_PLAYERS]{};
         std::atomic<Status> status{ Status::NotInstalled };
 
+        // Used only for a useful error string. Audio processing never reads it.
+        std::atomic<long> unsupportedSampleType{ -1 };
+
+        bool IsSupportedSampleType(long sampleType)
+        {
+            return
+                sampleType == ASIOSTInt32LSB ||
+                sampleType == ASIOSTFloat32LSB;
+        }
+
+        Audio::SampleFormat CaptureSampleFormat(
+            long sampleType)
+        {
+            switch (sampleType)
+            {
+            case ASIOSTInt32LSB:
+                return Audio::SampleFormat::Int32;
+
+            case ASIOSTFloat32LSB:
+                return Audio::SampleFormat::Float32;
+
+            default:
+                return Audio::SampleFormat::Unsupported;
+            }
+        }
+
+        const char* SampleTypeName(long sampleType)
+        {
+            switch (sampleType)
+            {
+            case ASIOSTInt16LSB:
+                return "Int16LSB";
+
+            case ASIOSTInt24LSB:
+                return "Int24LSB";
+
+            case ASIOSTInt32LSB:
+                return "Int32LSB";
+
+            case ASIOSTFloat32LSB:
+                return "Float32LSB";
+
+            case ASIOSTFloat64LSB:
+                return "Float64LSB";
+
+            case ASIOSTInt32LSB16:
+                return "Int32LSB16";
+
+            case ASIOSTInt32LSB18:
+                return "Int32LSB18";
+
+            case ASIOSTInt32LSB20:
+                return "Int32LSB20";
+
+            case ASIOSTInt32LSB24:
+                return "Int32LSB24";
+
+            default:
+                return nullptr;
+            }
+        }
+
         void* PatchVTableSlot(
             void* object,
             size_t slotIndex,
             void* replacement)
         {
-            if (!object) return nullptr;
+            if (!object)
+                return nullptr;
 
-            void** vtable = *reinterpret_cast<void***>(object);
-            if (!vtable) return nullptr;
+            void** vtable =
+                *reinterpret_cast<void***>(
+                    object);
 
-            void** slot = &vtable[slotIndex];
+            if (!vtable)
+                return nullptr;
+
+            void** slot =
+                &vtable[slotIndex];
 
             DWORD oldProtect = 0;
+
             if (!VirtualProtect(
                     slot,
                     sizeof(void*),
@@ -131,6 +236,7 @@ namespace AsioPassthrough
             *slot = replacement;
 
             DWORD ignored = 0;
+
             VirtualProtect(
                 slot,
                 sizeof(void*),
@@ -187,7 +293,7 @@ namespace AsioPassthrough
             const std::string& name,
             CLSID& clsid)
         {
-            std::string keyPath =
+            const std::string keyPath =
                 "SOFTWARE\\ASIO\\" + name;
 
             HKEY key = nullptr;
@@ -206,13 +312,15 @@ namespace AsioPassthrough
             DWORD size = sizeof(value);
             DWORD type = 0;
 
-            LONG result = RegQueryValueExA(
-                key,
-                "CLSID",
-                nullptr,
-                &type,
-                reinterpret_cast<BYTE*>(value),
-                &size);
+            const LONG result =
+                RegQueryValueExA(
+                    key,
+                    "CLSID",
+                    nullptr,
+                    &type,
+                    reinterpret_cast<BYTE*>(
+                        value),
+                    &size);
 
             RegCloseKey(key);
 
@@ -273,13 +381,15 @@ namespace AsioPassthrough
             DWORD size = sizeof(modulePath);
             DWORD type = 0;
 
-            LONG result = RegQueryValueExW(
-                key,
-                nullptr,
-                nullptr,
-                &type,
-                reinterpret_cast<BYTE*>(modulePath),
-                &size);
+            const LONG result =
+                RegQueryValueExW(
+                    key,
+                    nullptr,
+                    nullptr,
+                    &type,
+                    reinterpret_cast<BYTE*>(
+                        modulePath),
+                    &size);
 
             RegCloseKey(key);
 
@@ -293,6 +403,145 @@ namespace AsioPassthrough
             }
 
             return modulePath;
+        }
+
+        bool ReadInputAsFloat(
+            const PlayerInput& input,
+            long doubleBufferIndex,
+            size_t count,
+            float* destination)
+        {
+            if (!destination)
+                return false;
+
+            void* rawBuffer =
+                input.buffers[
+                    doubleBufferIndex];
+
+            if (!rawBuffer)
+                return false;
+
+            switch (input.sampleType)
+            {
+            case ASIOSTInt32LSB:
+            {
+                const auto* samples =
+                    reinterpret_cast<
+                        const std::int32_t*>(
+                            rawBuffer);
+
+                for (size_t i = 0;
+                     i < count;
+                     ++i)
+                {
+                    destination[i] =
+                        static_cast<float>(
+                            samples[i]) *
+                        INT32_TO_FLOAT;
+                }
+
+                return true;
+            }
+
+            case ASIOSTFloat32LSB:
+            {
+                const auto* samples =
+                    reinterpret_cast<
+                        const float*>(
+                            rawBuffer);
+
+                for (size_t i = 0;
+                     i < count;
+                     ++i)
+                {
+                    destination[i] =
+                        samples[i];
+                }
+
+                return true;
+            }
+
+            default:
+                return false;
+            }
+        }
+
+        bool WriteInputFromFloat(
+            const PlayerInput& input,
+            long doubleBufferIndex,
+            size_t count,
+            const float* source)
+        {
+            if (!source)
+                return false;
+
+            void* rawBuffer =
+                input.buffers[
+                    doubleBufferIndex];
+
+            if (!rawBuffer)
+                return false;
+
+            switch (input.sampleType)
+            {
+            case ASIOSTInt32LSB:
+            {
+                auto* samples =
+                    reinterpret_cast<
+                        std::int32_t*>(
+                            rawBuffer);
+
+                for (size_t i = 0;
+                     i < count;
+                     ++i)
+                {
+                    float value =
+                        source[i];
+
+                    if (value < -1.0f)
+                        value = -1.0f;
+
+                    if (value > 1.0f)
+                        value = 1.0f;
+
+                    samples[i] =
+                        static_cast<
+                            std::int32_t>(
+                                value *
+                                FLOAT_TO_INT32);
+                }
+
+                return true;
+            }
+
+            case ASIOSTFloat32LSB:
+            {
+                auto* samples =
+                    reinterpret_cast<float*>(
+                        rawBuffer);
+
+                for (size_t i = 0;
+                     i < count;
+                     ++i)
+                {
+                    float value =
+                        source[i];
+
+                    if (value < -1.0f)
+                        value = -1.0f;
+
+                    if (value > 1.0f)
+                        value = 1.0f;
+
+                    samples[i] = value;
+                }
+
+                return true;
+            }
+
+            default:
+                return false;
+            }
         }
 
         void ProcessInputBuffer(
@@ -311,7 +560,8 @@ namespace AsioPassthrough
             }
 
             if (activeBufferFrames <= 0 ||
-                activeBufferFrames > MAX_BUFFER_FRAMES)
+                activeBufferFrames >
+                    MAX_BUFFER_FRAMES)
             {
                 return;
             }
@@ -330,28 +580,19 @@ namespace AsioPassthrough
                 if (!input.active)
                     continue;
 
-                if (input.sampleType !=
-                    ASIOSTInt32LSB)
+                if (!IsSupportedSampleType(
+                        input.sampleType))
                 {
                     continue;
                 }
 
-                auto* samples =
-                    reinterpret_cast<std::int32_t*>(
-                        input.buffers[
-                            doubleBufferIndex]);
-
-                if (!samples)
-                    continue;
-
-                for (size_t i = 0;
-                     i < count;
-                     ++i)
+                if (!ReadInputAsFloat(
+                        input,
+                        doubleBufferIndex,
+                        count,
+                        input.conversionBuffer.data()))
                 {
-                    input.conversionBuffer[i] =
-                        static_cast<float>(
-                            samples[i]) *
-                        INT32_TO_FLOAT;
+                    continue;
                 }
 
                 input.shifter.Process(
@@ -359,24 +600,11 @@ namespace AsioPassthrough
                     static_cast<std::uint32_t>(
                         activeBufferFrames));
 
-                for (size_t i = 0;
-                     i < count;
-                     ++i)
-                {
-                    float value =
-                        input.conversionBuffer[i];
-
-                    if (value < -1.0f)
-                        value = -1.0f;
-
-                    if (value > 1.0f)
-                        value = 1.0f;
-
-                    samples[i] =
-                        static_cast<std::int32_t>(
-                            value *
-                            FLOAT_TO_INT32);
-                }
+                WriteInputFromFloat(
+                    input,
+                    doubleBufferIndex,
+                    count,
+                    input.conversionBuffer.data());
             }
         }
 
@@ -460,6 +688,10 @@ namespace AsioPassthrough
 
             status.store(
                 Status::WaitingForBuffers,
+                std::memory_order_release);
+
+            unsupportedSampleType.store(
+                -1,
                 std::memory_order_release);
 
             activeBufferFrames = 0;
@@ -627,9 +859,18 @@ namespace AsioPassthrough
                     if (!input.active)
                         continue;
 
-                    if (input.sampleType !=
-                        ASIOSTInt32LSB)
+                    if (!IsSupportedSampleType(
+                            input.sampleType))
                     {
+                        long expected = -1;
+
+                        unsupportedSampleType
+                            .compare_exchange_strong(
+                                expected,
+                                input.sampleType,
+                                std::memory_order_release,
+                                std::memory_order_relaxed);
+
                         continue;
                     }
 
@@ -637,7 +878,8 @@ namespace AsioPassthrough
                         playerFormat = format;
 
                     playerFormat.sampleFormat =
-                        Audio::SampleFormat::Int32;
+                        CaptureSampleFormat(
+                            input.sampleType);
 
                     input.conversionBuffer.assign(
                         static_cast<size_t>(
@@ -696,7 +938,7 @@ namespace AsioPassthrough
             if (!originalCreateInstance)
                 return E_FAIL;
 
-            HRESULT result =
+            const HRESULT result =
                 originalCreateInstance(
                     self,
                     outer,
@@ -786,7 +1028,7 @@ namespace AsioPassthrough
         IClassFactory* factory =
             nullptr;
 
-        HRESULT hr =
+        const HRESULT hr =
             dllGetClassObject(
                 driverClsid,
                 IID_IClassFactory,
@@ -914,7 +1156,41 @@ namespace AsioPassthrough
             return "ASIO: no input channel bound";
 
         case Status::UnsupportedFormat:
+        {
+            const long sampleType =
+                unsupportedSampleType.load(
+                    std::memory_order_acquire);
+
+            if (sampleType >= 0)
+            {
+                static thread_local
+                    char message[96] = {};
+
+                const char* name =
+                    SampleTypeName(
+                        sampleType);
+
+                if (name)
+                {
+                    sprintf_s(
+                        message,
+                        "ASIO: unsupported input format %s (%ld)",
+                        name,
+                        sampleType);
+                }
+                else
+                {
+                    sprintf_s(
+                        message,
+                        "ASIO: unsupported input format type %ld",
+                        sampleType);
+                }
+
+                return message;
+            }
+
             return "ASIO: unsupported input format";
+        }
 
         case Status::DuplicateChannel:
             return "ASIO: duplicate input Channel";
