@@ -33,7 +33,7 @@ namespace ScreenshotControl
             L"Debug";
 
         constexpr const char* VERSION_TEXT =
-            "RL-Mods 1.3";
+            "RL-Mods 1.4.1";
 
         bool g_enabled = true;
         bool g_debug = false;
@@ -415,7 +415,7 @@ namespace ScreenshotControl
                     buffer,
                     "RL-Mods Hotkeys\n"
                     "\n"
-                    ", / .   Drop tuning down / up\n"
+                    ", / .   Manual tuning down / up\n"
                     "; / '   Reference pitch down / up\n"
                     "\\      Reset reference to A440\n"
                     "F4      Show this hotkey help\n"
@@ -423,6 +423,9 @@ namespace ScreenshotControl
                     "F6/F7   Screenshot delay -1s / +1s\n"
                     "F8      Refresh song enumeration\n"
                     "F9      Tuning mode: P1 / P2 / Sync / Auto\n"
+                    "F10     Physical guitar Setup Mode\n"
+                    "\n"
+                    "Setup: ,/. P1 down/up   ;/' P2 down/up\n"
                     "\n"
                     "\"If it sounds bad, that's probably still you.\"\n"
                     "%s",

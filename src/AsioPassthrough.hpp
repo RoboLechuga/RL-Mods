@@ -25,7 +25,7 @@ namespace AsioPassthrough
     void SetTuning(int semitones, int referenceHz);
     void SetPlayerTuning(int player, int semitones, int referenceHz);
 
-    // Exact ratio control is used by the 1.3 tuning layer when the physical
+    // Exact ratio control is used by the tuning layer when the physical
     // guitar's reference is not A440. 1.0f is the true dry/neutral path.
     void SetPlayerRatio(int player, float ratio);
 
