@@ -1,14 +1,18 @@
-# RL-Mods v1.3
+# RL-Mods v1.4.1
 
 A lightweight Rocksmith 2014 Remastered mod focused on practical quality-of-life features without the large hook/protection layer used by broader mod suites.
 
 ## Features
 
 - F8 song re-enumeration without restarting Rocksmith
-- Real-time ASIO pitch shifting
-- Manual tuning from E Standard down to one octave below
+- Real-time ASIO pitch shifting (includes support for Int32LSB and Float32LSB ASIO sample formats)
+- Manual pitch shifting down or up
 - Alternate tuning reference from A420 through A461
 - Automatic song tuning from Rocksmith's pre-song tuner
+- Runtime physical guitar tuning setup with F10
+- Physical-aware bidirectional Auto tuning
+- Immediate Auto recalculation after changing physical guitar setup
+- Persistent Player 1 / Player 2 physical guitar baselines
 - True dry bypass at neutral pitch / A440
 - Single-player and two-player tuning OSD
 - ASIO readiness and error reporting
@@ -39,6 +43,10 @@ Create or update `RLMods.ini` in the Rocksmith directory:
 [Rocksmith]
 Version=2022
 
+[Tuning]
+Player1Physical=0
+Player2Physical=0
+
 [OSD]
 DurationMs=5000
 
@@ -50,7 +58,17 @@ Debug=0
 
 Use `Version=2022` for the September 2022 Remastered executable or `Version=2024` for the Learn & Play memory layout.
 
+`Player1Physical` and `Player2Physical` are semitone offsets from E Standard:
+
+- `0` = E Standard
+- `-1` = Eb Standard
+- `-2` = D Standard
+
+If the tuning values are omitted, RL-Mods defaults to E Standard.
+
 ## Controls
+
+### Normal Tuning Mode
 
 - `F4` — Show RL-Mods hotkey help
 - `F5` — Toggle automatic score screenshots
@@ -58,11 +76,22 @@ Use `Version=2022` for the September 2022 Remastered executable or `Version=2024
 - `F7` — Increase screenshot delay by 1 second
 - `F8` — Re-enumerate songs
 - `F9` — Cycle tuning mode: Player 1 / Player 2 / Sync / Auto
+- `F10` — Enter physical guitar Setup Mode
 - `,` — Drop one semitone in manual mode
 - `.` — Raise one semitone in manual mode
 - `;` — Reference frequency -1 Hz
 - `'` — Reference frequency +1 Hz
 - `\` — Reset reference to A440
+
+### Setup Mode
+
+- `F10` — Exit Setup Mode
+- `,` — Player 1 physical tuning down one semitone
+- `.` — Player 1 physical tuning up one semitone
+- `;` — Player 2 physical tuning down one semitone
+- `'` — Player 2 physical tuning up one semitone
+
+While Setup Mode is active, the tuning OSD stays visible and the current audio shift remains unchanged.
 
 RL-Mods hotkeys only act while Rocksmith owns the foreground window. Key presses made while another application has focus are discarded rather than queued for later.
 
@@ -82,26 +111,55 @@ Auto is the default tuning mode. Press `F9` to cycle into the manual Player 1 / 
 
 Auto uses Rocksmith's pre-song tuner as the authority. The primary reader uses Rocksmith's six-string tuner target object directly, including custom tunings; the legacy single-player tuner text path is retained only as a compatibility fallback.
 
-When a pre-song tuner appears, RL-Mods reads the target tuning and applies the useful whole-guitar downshift before Rocksmith checks the strings. Any remaining non-uniform string changes are performed physically in Rocksmith's tuner.
+RL-Mods compares the song target to the physical guitar tuning currently known for that player and chooses a global virtual pitch shift that minimizes physical retuning.
+
+The selection favors:
+
+1. the fewest strings requiring physical retuning
+2. the least total physical semitone movement
+3. the smallest virtual pitch shift when otherwise tied
 
 Examples:
 
-- E Standard song → virtual shift `0`
-- Eb Standard song → virtual shift `-1`
-- D Standard song → virtual shift `-2`
-- Drop D song → virtual shift `0`; tune the low E string physically
-- Eb Drop Db song → virtual shift `-1`; tune the low string physically to D
-- Open G → virtual shift `0`; perform the Open G string changes physically
+- Guitar in E Standard → D Standard song: virtual shift `-2`
+- Guitar in Eb Standard → E Standard song: virtual shift `+1`
+- Guitar in Eb Standard → D Standard song: virtual shift `-1`
+- Guitar in Eb Standard → Drop D song: virtual shift `+1`; only the low string needs to move physically
+- Guitar in Drop D → E Standard song: virtual shift `0`; only the low string needs to return to E
+- Guitar in Eb Standard → Eb Drop Db song: virtual shift `0`; only the low string needs to move physically
 
-When the tuner successfully advances into gameplay, the shift is latched for the song. RL-Mods does not continuously recalculate tuning during gameplay.
+Any remaining non-uniform string changes are performed physically in Rocksmith's tuner.
+
+When the tuner successfully advances into gameplay, the shift is latched for the song.
 
 This also supports Nonstop Play: if Rocksmith presents another pre-song tuner, Auto processes the new target. If Rocksmith skips the tuner, RL-Mods leaves the current shift unchanged.
+
+## Physical Guitar Setup
+
+Press `F10` to tell RL-Mods what tuning the guitar in your hands is actually in.
+
+Setup Mode changes the declared standard tuning for Player 1 and Player 2 independently without leaving Rocksmith or editing the INI manually.
+
+Use Setup Mode when:
+
+- starting with a guitar that is not in the saved tuning
+- swapping to a differently tuned guitar
+- manually changing the guitar tuning outside Rocksmith
+- correcting RL-Mods' current physical tuning assumption
+
+When Setup Mode is exited, the declared physical tuning is saved to `RLMods.ini` and becomes the starting baseline for the next Rocksmith session.
+
+Temporary string-specific retuning inferred during normal Auto operation does not overwrite the saved baseline.
+
+If Setup Mode is used while Auto already has a valid current song target, RL-Mods recalculates the required virtual shift when Setup Mode is exited.
 
 ## Tuning OSD
 
 The tuning OSD shows the active tuning mode, guitar tuning, effective target, pitch shift, and reference frequency.
 
-The OSD hold time is configurable in `RLMods.ini`:
+In Setup Mode, the OSD stays visible while physical guitar tuning is being changed.
+
+The normal OSD hold time is configurable in `RLMods.ini`:
 
 ```ini
 [OSD]
@@ -117,11 +175,14 @@ ASIO setup failures are reported instead of silently accepting tuning commands t
 `ASIO: waiting for audio` is a normal transient startup state.
 
 Common errors:
+RL-Mods supports Int32LSB and Float32LSB ASIO input formats. Either may be used; there is no required preference between them.
+If the ASIO driver exposes another format, RL-Mods reports the detected format when possible, for example:
+ASIO: unsupported input format Int24LSB (17)
 
 - `ASIO hook failed` — RL-Mods could not install its RS_ASIO interception.
 - `ASIO: buffer setup failed` — the ASIO driver failed while creating or recreating its buffers.
 - `ASIO: no input channel bound` — check the `Channel=` value in the relevant `[Asio.Input.N]` section of `RS_ASIO.ini`.
-- `ASIO: unsupported input format` — the bound input is not using the supported 32-bit integer ASIO sample format.
+- `ASIO: unsupported input format` ... — the bound input is not using `Int32LSB` or `Float32LSB`; the reported format/type is included when available.
 - `ASIO: duplicate input Channel` — both player inputs are configured to the same ASIO channel.
 
 RL-Mods matches `RS_ASIO.ini` `Channel=` directly to the driver's ASIO channel number.
