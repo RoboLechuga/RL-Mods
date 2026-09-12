@@ -1,4 +1,4 @@
-# RL-Mods v1.4
+# RL-Mods v1.4.1
 
 A lightweight Rocksmith 2014 Remastered mod focused on practical quality-of-life features without the large hook/protection layer used by broader mod suites.
 

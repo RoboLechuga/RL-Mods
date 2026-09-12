@@ -20,7 +20,7 @@ the above copyright notice and this license appear in all source copies.
 THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT EXPRESS OR IMPLIED WARRANTY OF
 ANY KIND. See http://www.dspguru.com/wol.htm for more information.
 
-RSMods-Min changes include:
+RL-Mods changes include:
 - Moving the original process-global static DSP state into each shifter object.
 - Supporting independent shifter state for multiplayer inputs.
 - Integrating Rocksmith semitone/reference-frequency controls.
